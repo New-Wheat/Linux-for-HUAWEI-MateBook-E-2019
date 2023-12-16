@@ -1,6 +1,6 @@
 # Linux for HUAWEI MateBook E 2019
 
-Devicetree and other information to run Linux on HUAWEI MateBook E 2019
+[Devicetree](https://gitlab.com/New-Wheat/linux-for-huawei-matebook-e-2019/-/blob/main/sdm850-huawei-matebook-e-2019.dts) and other information to run Linux on HUAWEI MateBook E 2019
 
 ## Status
 
@@ -27,9 +27,9 @@ Supported features (requires proper firmware files placed in `/lib/firmware`):
     - front camera: gc5025 (no sensor driver found)
     - rear camera: s5k3l6 (wip)
 - [ ] Battery monitoring
-    - needs special EC driver (attached to `&i2c6` at 0x76)
+    - needs special EC driver (attached to `&i2c7` at 0x76)
 - [ ] Backlight
-    - needs special EC driver (attached to `&i2c6` at 0x76)
+    - needs special EC driver (attached to `&i2c7` at 0x76)
 
 ## Source Code
 
