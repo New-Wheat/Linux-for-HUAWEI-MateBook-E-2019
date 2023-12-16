@@ -1,24 +1,24 @@
 # Linux for HUAWEI MateBook E 2019
 
-
+Devicetree and other information to run Linux on HUAWEI MateBook E 2019
 
 ## Status
 
-Support features (requires proper firmware files placed in `/lib/firmware`):
+Supported features (requires proper firmware files placed in `/lib/firmware`):
     
-- volume key
-- power key
-- touchscreen
-- stylus
-- wifi
-- bluetooth
-- usb
-- keyboard
-- touchpad
-- ufs
-- audio (EXTREMELY unstable)
-- gpu
-- cellular network
+- Volume Key
+- Power Key
+- Touchscreen
+- Stylus
+- WiFi
+- Bluetooth
+- USB
+- Keyboard
+- Touchpad
+- UFS
+- Audio (EXTREMELY unstable)
+- GPU
+- Mobile Network
 
 ## Todo
 
