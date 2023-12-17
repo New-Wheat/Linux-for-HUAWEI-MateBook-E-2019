@@ -4,7 +4,7 @@
 
 ## Status
 
-Supported features (some requires proper firmware files placed in `/lib/firmware`):
+Supported features (some require proper firmware files placed in `/lib/firmware`):
 
 - Volume Key
 - Power Key
