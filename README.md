@@ -4,21 +4,23 @@
 
 ## Status
 
-Supported features (requires proper firmware files placed in `/lib/firmware`):
-    
+Supported features (some requires proper firmware files placed in `/lib/firmware`):
+
 - Volume Key
 - Power Key
 - Touchscreen
 - Stylus
 - WiFi
 - Bluetooth
+- GPU
 - USB
 - Keyboard
 - Touchpad
 - UFS
-- Audio (EXTREMELY unstable)
-- GPU
+- SD Card
+- Audio (EXTREMELY unstable, `status = "disabled"` by default)
 - Mobile Network
+- Camera Indicator LED
 
 ## Todo
 
