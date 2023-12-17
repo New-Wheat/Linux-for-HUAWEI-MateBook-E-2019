@@ -204,11 +204,11 @@
 		regulator-min-microvolt = <1200000>;
 		regulator-max-microvolt = <1200000>;
 		
-		gpio = <&pm8998_gpios 12 GPIO_ACTIVE_HIGH>;
-		enable-active-high;
+		gpio = <&tlmm 8 GPIO_ACTIVE_HIGH>;
 		
-		pinctrl-names = "default";
-		pinctrl-0 = <&cam0_dvdd_1v2_en_default>;
+		enable-active-high;
+		regulator-boot-on;
+		regulator-always-on;
 		
 		vin-supply = <&vph_pwr>;
 	};
@@ -220,12 +220,12 @@
 		regulator-min-microvolt = <2800000>;
 		regulator-max-microvolt = <2800000>;
 		
-		gpio = <&pm8998_gpios 10 GPIO_ACTIVE_HIGH>;
+		gpio = <&tlmm 27 GPIO_ACTIVE_HIGH>;
+		
 		enable-active-high;
-		
-		pinctrl-names = "default";
-		pinctrl-0 = <&cam0_avdd_2v8_en_default>;
-		
+		regulator-boot-on;
+		regulator-always-on;
+
 		vin-supply = <&vph_pwr>;
 	};
 
@@ -249,7 +249,7 @@
 		compatible = "led-backlight";
 		status = "disabled";
 
-		leds = <&leds>;
+		//leds = <&leds>;
 		enable-gpios = <&tlmm 11 GPIO_ACTIVE_HIGH>;
 	};
 
@@ -266,15 +266,18 @@
 		};
 	};
 
-	leds: led {
+	leds {
 		compatible = "gpio-leds";
-		status = "disabled";
 
-		wled {
-			gpios = <&tlmm 11 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_indicator_en>;
+
+		led_camera_indicator: led {
+			label = "white:camera-indicator";
+			function = LED_FUNCTION_INDICATOR;
 			color = <LED_COLOR_ID_WHITE>;
-			default-state = "on";
-			function = LED_FUNCTION_BACKLIGHT;
+			gpios = <&tlmm 12 GPIO_ACTIVE_HIGH>;
+			linux,default-trigger = "flash";
 		};
 	};
 };
@@ -487,6 +490,8 @@
 			regulator-min-microvolt = <2864000>;
 			regulator-max-microvolt = <3312000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+			
+			regulator-always-on;
 		};
 
 		vreg_l23a_3p3: ldo23 {
@@ -536,13 +541,13 @@
 		vreg_lvs1a_1p8: lvs1 {
 			regulator-min-microvolt = <1800000>;
 			regulator-max-microvolt = <1800000>;
+			
 			regulator-always-on;
 		};
 
 		vreg_lvs2a_1p8: lvs2 {
 			regulator-min-microvolt = <1800000>;
 			regulator-max-microvolt = <1800000>;
-			regulator-always-on;
 		};
 	};
 
@@ -563,7 +568,7 @@
 };
 
 &camss {
-	status = "disabled";
+	status = "okay";
 
 	vdda-phy-supply = <&vdda_mipi_csi0_0p9>;
 	vdda-pll-supply = <&vdda_mipi_csi_1p25>;
@@ -574,7 +579,7 @@
 		port@0 {
 			reg = <0>;
 			csiphy0_ep: endpoint {
-				data-lanes = <0 1 2 3>;
+				data-lanes = <0 1>;
 				remote-endpoint = <&s5k3l6xx_ep>;
 			};
 		};
@@ -586,10 +591,10 @@
 };
 
 &cci_i2c0 {
-	rear-camera@50 {
-		status = "disabled";
+	rear-camera@c {
+		status = "okay";
 		compatible = "samsung,s5k3l6xx";
-		reg = <0x50>;
+		reg = <0x0c>;
 
 		pinctrl-names = "default";
 		pinctrl-0 = <&cam0_default>;
@@ -602,15 +607,17 @@
 
 		rstn-gpios = <&tlmm 28 GPIO_ACTIVE_LOW>;
 
+		ldo-supply = <&vreg_l22a_2p85>;
 		vdda-supply = <&cam0_avdd_2v8>;		/* analog power 2,8V */
 		vddd-supply = <&cam0_dvdd_1v2>;		/* VDDD digital power 1,2V, camera expects 0.95V..1.15V */
 		vddio-supply = <&vreg_lvs1a_1p8>;	/* I/O power supply 1,8V */
 
+		flash-leds = <&led_camera_indicator>;
 		orientation = <1>;
 
 		port {
 			s5k3l6xx_ep: endpoint {
-				data-lanes = <1 2 3 4>;
+				data-lanes = <1 2>;
 				remote-endpoint = <&csiphy0_ep>;
 			};
 		};
@@ -833,24 +840,6 @@
 		qcom,drive-strength = <PMIC_GPIO_STRENGTH_NO>;
 	};
 
-	cam0_dvdd_1v2_en_default: cam0-dvdd-1v2-en-state {
-		pins = "gpio12";
-		function = "normal";
-
-		bias-pull-up;
-		drive-push-pull;
-		qcom,drive-strength = <PMIC_GPIO_STRENGTH_HIGH>;
-	};
-
-	cam0_avdd_2v8_en_default: cam0-avdd-2v8-en-state {
-		pins = "gpio10";
-		function = "normal";
-
-		bias-pull-up;
-		drive-push-pull;
-		qcom,drive-strength = <PMIC_GPIO_STRENGTH_HIGH>;
-	};
-
 	volume_up_gpio: pm8998-gpio6-state {
 		pins = "gpio6";
 		function = "normal";
@@ -927,7 +916,7 @@
 	compatible = "lenovo,yoga-c630-sndcard", "qcom,sdm845-sndcard";
 	model = "HUAWEI-PAK_AL09-M1040";
 
-	status = "okay";
+	status = "disabled";
 
 	audio-routing =
 		"RX_BIAS", "MCLK",
@@ -1009,19 +998,12 @@
 &tlmm {
 	gpio-reserved-ranges = <0 4>, <81 4>;
 
-	cam_mclk0_default: cam-mclk0-default {
-        pins = "gpio13";
-        function = "cam_mclk";
-        drive-strength = <2>;
-        bias-disable;
-    };
-
 	cam0_default: cam0_default {
 		rst {
 			pins = "gpio28";
 			function = "gpio";
 
-			drive-strength = <16>;
+			drive-strength = <2>;
 			bias-disable;
 		};
 
@@ -1029,14 +1011,23 @@
 			pins = "gpio13";
 			function = "cam_mclk";
 
-			drive-strength = <16>;
+			drive-strength = <2>;
 			bias-disable;
 		};
+	};
+
+	cam_indicator_en: cam-indicator-en-state {
+		pins = "gpio12";
+		function = "gpio";
+
+		drive-strength = <2>;
+		bias-disable;
 	};
 
 	sn65dsi86_pin_active: sn65dsi86-enable-state {
 		pins = "gpio96";
 		function = "gpio";
+
 		drive-strength = <2>;
 		bias-disable;
 	};
