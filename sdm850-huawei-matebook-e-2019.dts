@@ -39,10 +39,12 @@
 	chassis-type = "convertible";
 
 	aliases {
-		bluetooth0 = &bluetooth;
 		serial0 = &uart9;
 		serial1 = &uart6;
-		wifi0 = &wifi;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
 	};
 
 	gpio-keys {
@@ -68,7 +70,7 @@
 	};
 
 	reserved-memory {
-		rmtfs_mem: rmtfs@99000000 {
+		rmtfs_mem: rmtfs-mem@99000000 {
 			compatible = "qcom,rmtfs-mem";
 			reg = <0 0x99000000 0 0x200000>;
 			no-map;
@@ -77,62 +79,62 @@
 			qcom,vmid = <15>;
 		};
 
-		cont_splash_mem: memory@80100000 {
+		cont_splash_mem: cont-splash-mem@80100000 {
 			reg = <0x0 0x80100000 0x0 0xd00000>;
 			no-map;
 		};
 
-		qseecom_mem: memory@8b500000 {
+		qseecom_mem: qseecom-mem@8b500000 {
 			reg = <0 0x8b500000 0 0xa00000>;
 			no-map;
 		};
 
-		wlan_msa_mem: memory@8c400000 {
+		wlan_msa_mem: wlan-msa-mem@8c400000 {
 			reg = <0 0x8c400000 0 0x100000>;
 			no-map;
 		};
 
-		slpi_mem: memory@8c500000 {
+		slpi_mem: slpi-mem@8c500000 {
 			reg = <0 0x8c500000 0 0x1200000>;
 			no-map;
 		};
 
-		ipa_fw_mem: memory@8d700000 {
+		ipa_fw_mem: ipa-fw-mem@8d700000 {
 			reg = <0 0x8d700000 0 0x100000>;
 			no-map;
 		};
 
-		gpu_mem: memory@99200000 {
+		gpu_mem: gpu-mem@99200000 {
 			reg = <0 0x99200000 0 0x5000>;
 			no-map;
 		};
 
-		mpss_region: memory@8e000000 {
+		mpss_region: mpss-region@8e000000 {
 			reg = <0 0x8e000000 0 0x8000000>;
 			no-map;
 		};
 
-		adsp_mem: memory@96000000 {
+		adsp_mem: adsp-mem@96000000 {
 			reg = <0 0x96000000 0 0x2000000>;
 			no-map;
 		};
 
-		cdsp_mem: memory@98000000 {
+		cdsp_mem: cdsp-mem@98000000 {
 			reg = <0 0x98000000 0 0x800000>;
 			no-map;
 		};
 
-		venus_mem: memory@98800000 {
+		venus_mem: venus-mem@98800000 {
 			reg = <0 0x98800000 0 0x500000>;
 			no-map;
 		};
 
-		mba_region: memory@98d00000 {
+		mba_region: mba-region@98d00000 {
 			reg = <0 0x98d00000 0 0x200000>;
 			no-map;
 		};
 
-		spss_mem: memory@98f00000 {
+		spss_mem: spss-mem@98f00000 {
 			reg = <0 0x98f00000 0 0x100000>;
 			no-map;
 		};
@@ -171,19 +173,6 @@
 		regulator-always-on;
 	};
 
-	vreg_s4a_1p8: regulator-smps4 {
-		compatible = "regulator-fixed";
-		regulator-name = "vreg_s4a_1p8";
-
-		regulator-min-microvolt = <1800000>;
-		regulator-max-microvolt = <1800000>;
-
-		regulator-always-on;
-		regulator-boot-on;
-
-		vin-supply = <&vph_pwr>;
-	};
-
 	vlcm_3v3: regulator-vlcm-3v3 {
 		compatible = "regulator-fixed";
 		regulator-name = "vlcm_3v3";
@@ -204,7 +193,7 @@
 		regulator-min-microvolt = <1200000>;
 		regulator-max-microvolt = <1200000>;
 		
-		gpio = <&tlmm 8 GPIO_ACTIVE_HIGH>;
+		//gpio = <&tlmm 8 GPIO_ACTIVE_HIGH>;
 		
 		enable-active-high;
 		regulator-boot-on;
@@ -220,7 +209,7 @@
 		regulator-min-microvolt = <2800000>;
 		regulator-max-microvolt = <2800000>;
 		
-		gpio = <&tlmm 27 GPIO_ACTIVE_HIGH>;
+		//gpio = <&tlmm 27 GPIO_ACTIVE_HIGH>;
 		
 		enable-active-high;
 		regulator-boot-on;
@@ -245,17 +234,8 @@
 		vin-supply = <&vph_pwr>;
 	};
 
-	backlight: backlight {
-		compatible = "led-backlight";
-		status = "disabled";
-
-		//leds = <&leds>;
-		enable-gpios = <&tlmm 11 GPIO_ACTIVE_HIGH>;
-	};
-
 	panel: panel {
 		compatible = "innolux,p120zdg-bf1";
-		//backlight = <&backlight>;
 		power-supply = <&vlcm_3v3>;
 		no-hpd;
 
@@ -272,7 +252,7 @@
 		pinctrl-names = "default";
 		pinctrl-0 = <&cam_indicator_en>;
 
-		led_camera_indicator: led {
+		camera_indicator_led: led-0 {
 			label = "white:camera-indicator";
 			function = LED_FUNCTION_INDICATOR;
 			color = <LED_COLOR_ID_WHITE>;
@@ -317,21 +297,31 @@
 		vreg_s2a_1p125: smps2 {
 			regulator-min-microvolt = <1100000>;
 			regulator-max-microvolt = <1100000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 		};
 
 		vreg_s3a_1p35: smps3 {
 			regulator-min-microvolt = <1352000>;
 			regulator-max-microvolt = <1352000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_s4a_1p8: smps4 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 		};
 
 		vreg_s5a_2p04: smps5 {
 			regulator-min-microvolt = <1904000>;
 			regulator-max-microvolt = <2040000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 		};
 
 		vreg_s7a_1p025: smps7 {
 			regulator-min-microvolt = <900000>;
 			regulator-max-microvolt = <1028000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 		};
 
 		vdd_qusb_hs0:
@@ -442,6 +432,7 @@
 			regulator-min-microvolt = <1800000>;
 			regulator-max-microvolt = <1800000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+			regulator-always-on;
 		};
 
 		vreg_l15a_1p8: ldo15 {
@@ -572,7 +563,11 @@
 
 	vdda-phy-supply = <&vdda_mipi_csi0_0p9>;
 	vdda-pll-supply = <&vdda_mipi_csi_1p25>;
+	//vdda-csi0-supply = <&vdda_mipi_csi0_0p9>;
+	//vdda-csi1-supply = <&vdda_mipi_csi1_0p9>;
+	//vdda-csi2-supply = <&vdda_mipi_csi2_0p9>;
 
+	/*
 	ports {
 		#address-cells = <1>;
 		#size-cells = <0>;
@@ -584,15 +579,51 @@
 			};
 		};
 	};
+	*/
 };
 
 &cci {
 	status = "okay";
 };
+/*
+/ {
+    fake-reg-mclk0 {
+        compatible = "regulator-fixed-clock";
+        regulator-name = "fake-reg-mclk0";
+        pinctrl-names = "default";
+        pinctrl-0 = <&cam_mclk0_default>;
+        clocks = <&clock_camcc CAM_CC_MCLK0_CLK>;
+        regulator-always-on;
+    };
+	fake-reg-mclk1 {
+        compatible = "regulator-fixed-clock";
+        regulator-name = "fake-reg-mclk1";
+        pinctrl-names = "default";
+        pinctrl-0 = <&cam_mclk1_default>;
+        clocks = <&clock_camcc CAM_CC_MCLK1_CLK>;
+        regulator-always-on;
+    };
+};
 
+&tlmm {
+    cam_mclk0_default: cam-mclk0-default {
+        pins = "gpio13";
+        function = "cam_mclk";
+        drive-strength = <2>;
+        bias-disable;
+    };
+	cam_mclk1_default: cam-mclk1-default {
+        pins = "gpio15";
+        function = "cam_mclk";
+        drive-strength = <2>;
+        bias-disable;
+    };
+};
+*/
+/*
 &cci_i2c0 {
 	rear-camera@c {
-		status = "okay";
+		status = "disabled";
 		compatible = "samsung,s5k3l6xx";
 		reg = <0x0c>;
 
@@ -605,14 +636,14 @@
 
 		power-domains = <&clock_camcc TITAN_TOP_GDSC>;
 
-		rstn-gpios = <&tlmm 28 GPIO_ACTIVE_LOW>;
+		rstn-gpios = <&tlmm 23 GPIO_ACTIVE_HIGH>;
 
 		ldo-supply = <&vreg_l22a_2p85>;
-		vdda-supply = <&cam0_avdd_2v8>;		/* analog power 2,8V */
-		vddd-supply = <&cam0_dvdd_1v2>;		/* VDDD digital power 1,2V, camera expects 0.95V..1.15V */
-		vddio-supply = <&vreg_lvs1a_1p8>;	/* I/O power supply 1,8V */
+		vdda-supply = <&cam0_avdd_2v8>;		//analog power 2.8V
+		vddd-supply = <&cam0_dvdd_1v2>;		//VDDD digital power 1.2V, camera expects 0.95V-1.15V
+		vddio-supply = <&vreg_lvs1a_1p8>;	//I/O power supply 1.8V
 
-		flash-leds = <&led_camera_indicator>;
+		//flash-leds = <&camera_indicator_led>;
 		orientation = <1>;
 
 		port {
@@ -623,7 +654,7 @@
 		};
 	};
 };
-
+*/
 &cdsp_pas {
 	firmware-name = "qcom/sdm850/HUAWEI/AL09/qccdsp850.mbn";
 	status = "okay";
@@ -672,44 +703,18 @@
 };
 
 &i2c7 {
-	clock-frequency = <400000>;
 	status = "okay";
+	clock-frequency = <400000>;
 
-	embedded-controller@76 {
-		status = "disable";
-		compatible = "acer,aspire1-battery";
+	embedded_controller: ec@76 {
+		compatible = "huawei,planck-ec";
 		reg = <0x76>;
 
-		interrupt-parent = <&tlmm>;
-		interrupts = <30 IRQ_TYPE_LEVEL_LOW>;
+		interrupts-extended = <&tlmm 24 IRQ_TYPE_LEVEL_LOW>;
+		wakeup-source;
 
-		pinctrl-0 = <&ec_int_default>;
 		pinctrl-names = "default";
-
-		#address-cells = <1>;
-		#size-cells = <0>;
-
-		//wakeup-source;
-
-		/*
-		connector@0 {
-			compatible = "usb-c-connector";
-			reg = <0>;
-			power-role = "dual";
-			data-role = "dual";
-
-			ports {
-				#address-cells = <1>;
-				#size-cells = <0>;
-				port@1 {
-					reg = <1>;
-					ec_dp_in: endpoint {
-						remote-endpoint = <&mdss_dp_out>;
-					};
-				};
-			};
-		};
-		*/
+		pinctrl-0 = <&ec_int_default>;
 	};
 };
 
@@ -720,6 +725,7 @@
 	sn65dsi86: bridge@2c {
 		compatible = "ti,sn65dsi86";
 		reg = <0x2c>;
+
 		pinctrl-names = "default";
 		pinctrl-0 = <&sn65dsi86_pin_active>;
 
@@ -861,7 +867,27 @@
 	wakeup-source;
 };
 
+&qup_i2c3_default {
+	drive-strength = <2>;
+	bias-disable;
+};
+
+&qup_i2c5_default {
+	drive-strength = <2>;
+	bias-disable;
+};
+
+&qup_i2c7_default {
+	drive-strength = <2>;
+	bias-disable;
+};
+
 &qup_i2c10_default {
+	drive-strength = <2>;
+	bias-disable;
+};
+
+&qup_i2c12_default {
 	drive-strength = <2>;
 	bias-disable;
 };
@@ -879,15 +905,9 @@
 		reg = <0>;
 	};
 
-	/*
 	dai@1 {
 		reg = <1>;
 	};
-
-	dai@2 {
-		reg = <2>;
-	};
-	*/
 };
 
 &sdhc_2 {
@@ -913,16 +933,17 @@
 };
 
 &sound {
-	compatible = "lenovo,yoga-c630-sndcard", "qcom,sdm845-sndcard";
+	compatible = "qcom,sdm845-sndcard";
 	model = "HUAWEI-PAK_AL09-M1040";
 
-	status = "disabled";
+	status = "okay";
 
 	audio-routing =
 		"RX_BIAS", "MCLK",
 		"SpkrLeft IN", "SPK1 OUT",
 		"SpkrRight IN", "SPK2 OUT",
-		"MM_DL1",  "MultiMedia1 Playback";
+		"MM_DL1",  "MultiMedia1 Playback",
+		"MM_DL2",  "MultiMedia2 Playback";
 
 	mm1-dai-link {
 		link-name = "MultiMedia1";
@@ -931,21 +952,12 @@
 		};
 	};
 
-	/*
 	mm2-dai-link {
 		link-name = "MultiMedia2";
 		cpu {
 			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA2>;
 		};
 	};
-
-	mm3-dai-link {
-		link-name = "MultiMedia3";
-		cpu {
-			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA3>;
-		};
-	};
-	*/
 
 	slim-dai-link {
 		link-name = "SLIM Playback";
@@ -959,22 +971,6 @@
 
 		codec {
 			sound-dai = <&left_spkr>, <&right_spkr>, <&swm 0>, <&wcd9340 0>;
-		};
-	};
-
-	/*
-	slimcap-dai-link {
-		link-name = "SLIM WCD Capture";
-		cpu {
-			sound-dai = <&q6afedai SLIMBUS_0_TX>;
-		};
-
-		platform {
-			sound-dai = <&q6routing>;
-		};
-
-		codec {
-			sound-dai = <&wcd9340 1>;
 		};
 	};
 
@@ -992,15 +988,15 @@
 			sound-dai = <&wcd9340 2>;
 		};
 	};
-	*/
 };
 
 &tlmm {
 	gpio-reserved-ranges = <0 4>, <81 4>;
 
+	/*
 	cam0_default: cam0_default {
 		rst {
-			pins = "gpio28";
+			pins = "gpio23";
 			function = "gpio";
 
 			drive-strength = <2>;
@@ -1015,6 +1011,7 @@
 			bias-disable;
 		};
 	};
+	*/
 
 	cam_indicator_en: cam-indicator-en-state {
 		pins = "gpio12";
@@ -1049,7 +1046,7 @@
 	};
 
 	ec_int_default: ec-int-default-state {
-		pins = "gpio30";
+		pins = "gpio24";
 		function = "gpio";
 		
 		drive-strength = <2>;
@@ -1154,7 +1151,7 @@
 	pinctrl-0 = <&qup_uart6_4pin>;
 	status = "okay";
 
-	bluetooth: bluetooth {
+	bluetooth {
 		compatible = "qcom,wcn3990-bt";
 
 		vddio-supply = <&vreg_s4a_1p8>;
@@ -1256,7 +1253,7 @@
 	qcom,mbhc-headset-vthreshold-microvolt = <1700000>;
 	qcom,mbhc-headphone-vthreshold-microvolt = <50000>;
 
-	swm: swm@c85 {
+	swm: soundwire@c85 {
 		left_spkr: speaker@0,3 {
 			compatible = "sdw10217211000";
 			reg = <0 3>;
