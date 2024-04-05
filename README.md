@@ -18,7 +18,10 @@ Supported features (some require proper firmware files placed in `/lib/firmware`
 - Touchpad
 - UFS
 - SD Card
-- Audio (EXTREMELY unstable, `status = "disabled"` by default)
+- Battery Monitoring    (requires huawei-planck-ec.c driver)
+- Lid                   (requires huawei-planck-ec.c driver)
+- Backlight             (requires huawei-planck-ec.c driver)
+- Audio                 (EXTREMELY unstable, `status = "disabled"` by default)
 - Mobile Network
 - Camera Indicator LED
 
@@ -28,10 +31,6 @@ Supported features (some require proper firmware files placed in `/lib/firmware`
 - [ ] Camera
     - front camera: gc5025 (no sensor driver found)
     - rear camera: s5k3l6 (wip)
-- [ ] Battery monitoring
-    - needs special EC driver (attached to `&i2c7` at 0x76)
-- [ ] Backlight
-    - needs special EC driver (attached to `&i2c7` at 0x76)
 
 ## Source Code
 
