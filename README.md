@@ -21,7 +21,7 @@ Supported features (some require proper firmware files placed in `/lib/firmware`
 - Battery Monitoring    (requires huawei-planck-ec.c driver)
 - Lid                   (requires huawei-planck-ec.c driver)
 - Backlight             (requires huawei-planck-ec.c driver)
-- Audio                 (EXTREMELY unstable, `status = "disabled"` by default)
+- Audio                 (UNSTABLE, only speakers are supported now)
 - Mobile Network
 - Camera Indicator LED
 
@@ -40,4 +40,4 @@ s5k3l6 camera sensor driver: https://source.puri.sm/Librem5/linux/-/blob/pureos/
 
 ## Testing Platform
 
-Debian 12
+Debian 12 (Linux kernel 6.8)
