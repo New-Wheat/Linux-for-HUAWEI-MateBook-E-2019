@@ -1,6 +1,6 @@
 # Linux for HUAWEI MateBook E 2019
 
-[Devicetree](https://gitlab.com/New-Wheat/linux-for-huawei-matebook-e-2019/-/blob/main/sdm850-huawei-matebook-e-2019.dts) and other information to run Linux on HUAWEI MateBook E 2019
+[Devicetree](https://gitlab.com/New-Wheat/linux-for-huawei-matebook-e-2019/-/blob/main/sdm850-huawei-matebook-e-2019.dts) and extra resources to run Linux on HUAWEI MateBook E 2019
 
 ## Status
 
@@ -18,12 +18,17 @@ Supported features (some require proper firmware files placed in `/lib/firmware`
 - Touchpad
 - UFS
 - SD Card
-- Battery Monitoring    (requires huawei-planck-ec.c driver)
-- Lid                   (requires huawei-planck-ec.c driver)
-- Backlight             (requires huawei-planck-ec.c driver)
-- Audio                 (UNSTABLE, only speakers are supported now)
+- Audio _(**UNSTABLE**, only speakers and headphones are supported now)_
 - Mobile Network
-- Camera Indicator LED
+- Camera Indicator LED  
+- _**The following features requires [huawei-planck-ec](https://gitlab.com/New-Wheat/linux-for-huawei-matebook-e-2019/-/blob/main/drivers/power/supply/huawei-planck-ec.c) driver**_
+    - Battery Monitoring
+    - Lid
+    - Backlight  
+- _**The following features requires libssc and hexagonrpcd (See [here](https://gitlab.com/postmarketOS/pmaports/-/merge_requests/4050))**_
+    - Accelerometer
+    - Ambient Light Sensor
+
 
 ## Todo
 
@@ -40,4 +45,4 @@ s5k3l6 camera sensor driver: https://source.puri.sm/Librem5/linux/-/blob/pureos/
 
 ## Testing Platform
 
-Debian 12 (Linux kernel 6.8)
+Debian 12 (Linux kernel 6.9)
