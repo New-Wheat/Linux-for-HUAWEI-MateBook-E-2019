@@ -18,14 +18,14 @@ Supported features (some require proper firmware files placed in `/lib/firmware`
 - Touchpad
 - UFS
 - SD Card
-- Audio _(**UNSTABLE**, only speakers and headphones are supported now)_
+- Audio _(**UNSTABLE**, only speakers and headphones work now)_
 - Mobile Network
 - Camera Indicator LED  
-- _**The following features requires [huawei-planck-ec](https://gitlab.com/New-Wheat/linux-for-huawei-matebook-e-2019/-/blob/main/drivers/power/supply/huawei-planck-ec.c) driver**_
+- _**The following features require [huawei-planck-ec](https://gitlab.com/New-Wheat/linux-for-huawei-matebook-e-2019/-/blob/main/drivers/power/supply/huawei-planck-ec.c) driver**_
     - Battery Monitoring
     - Lid
     - Backlight  
-- _**The following features requires libssc and hexagonrpcd (See [here](https://gitlab.com/postmarketOS/pmaports/-/merge_requests/4050))**_
+- _**The following features require libssc and hexagonrpcd (See [here](https://gitlab.com/postmarketOS/pmaports/-/merge_requests/4050))**_
     - Accelerometer
     - Ambient Light Sensor
 
