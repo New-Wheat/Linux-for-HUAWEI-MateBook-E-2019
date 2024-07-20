@@ -45,4 +45,4 @@ s5k3l6 camera sensor driver: https://source.puri.sm/Librem5/linux/-/blob/pureos/
 
 ## Testing Platform
 
-Debian 12 (Linux kernel 6.9)
+Debian 12 (Linux kernel 6.10)
