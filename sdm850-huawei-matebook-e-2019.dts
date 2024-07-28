@@ -2,7 +2,7 @@
 /*
  * HUAWEI MateBook E (2019)
  *
- * Copyright (c) 2023, NewWheat
+ * Copyright (c) 2024, NewWheat
  */
 
 /dts-v1/;
@@ -182,54 +182,38 @@
 
 		gpio = <&tlmm 88 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
-		
+
 		vin-supply = <&vph_pwr>;
 	};
 
-	cam0_dvdd_1v2: cam0-dvdd-1v2-regulator {
+	cam0_dvdd_1v05: cam0-dvdd-1v05-regulator {
 		compatible = "regulator-fixed";
-		regulator-name = "cam0_dvdd_1v2";
-		
-		regulator-min-microvolt = <1200000>;
-		regulator-max-microvolt = <1200000>;
-		
-		//gpio = <&tlmm 8 GPIO_ACTIVE_HIGH>;
-		
+		regulator-name = "cam0_dvdd_1v05";
+
+		regulator-min-microvolt = <1050000>;
+		regulator-max-microvolt = <1050000>;
+
+		gpio = <&tlmm 61 GPIO_ACTIVE_HIGH>;
+
 		enable-active-high;
 		regulator-boot-on;
-		regulator-always-on;
-		
-		vin-supply = <&vph_pwr>;
+		//regulator-always-on;
+
+		vin-supply = <&vreg_s4a_1p8>;
 	};
 
 	cam0_avdd_2v8: cam0-avdd-2v8-regulator {
 		compatible = "regulator-fixed";
 		regulator-name = "cam0_avdd_2v8";
-		
+
 		regulator-min-microvolt = <2800000>;
 		regulator-max-microvolt = <2800000>;
-		
-		//gpio = <&tlmm 27 GPIO_ACTIVE_HIGH>;
-		
+
+		gpio = <&tlmm 63 GPIO_ACTIVE_HIGH>;
+
 		enable-active-high;
 		regulator-boot-on;
-		regulator-always-on;
-
-		vin-supply = <&vph_pwr>;
-	};
-
-	pcie0_3p3v_dual: vldo-3v3-regulator {
-		compatible = "regulator-fixed";
-		regulator-name = "pcie0_3v3_dual";
-
-		regulator-min-microvolt = <3300000>;
-		regulator-max-microvolt = <3300000>;
-
-		gpio = <&tlmm 90 GPIO_ACTIVE_HIGH>;
-		enable-active-high;
-
-		pinctrl-names = "default";
-		pinctrl-0 = <&pcie0_pwren_state>;
+		//regulator-always-on;
 
 		vin-supply = <&vph_pwr>;
 	};
@@ -252,12 +236,15 @@
 		pinctrl-names = "default";
 		pinctrl-0 = <&cam_indicator_en>;
 
-		camera_indicator_led: led-0 {
+		led: camera_indicator_led {
 			label = "white:camera-indicator";
 			function = LED_FUNCTION_INDICATOR;
 			color = <LED_COLOR_ID_WHITE>;
 			gpios = <&tlmm 12 GPIO_ACTIVE_HIGH>;
-			linux,default-trigger = "flash";
+			linux,default-trigger = "none";
+			default-state = "off";
+			/* Reuse as a panic indicator until we get a "camera on" trigger */
+			panic-indicator;
 		};
 	};
 };
@@ -481,8 +468,8 @@
 			regulator-min-microvolt = <2864000>;
 			regulator-max-microvolt = <3312000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
-			
-			regulator-always-on;
+
+			regulator-boot-on;
 		};
 
 		vreg_l23a_3p3: ldo23 {
@@ -533,6 +520,8 @@
 			regulator-min-microvolt = <1800000>;
 			regulator-max-microvolt = <1800000>;
 			
+			//enable-active-high;
+			regulator-boot-on;
 			regulator-always-on;
 		};
 
@@ -563,23 +552,18 @@
 
 	vdda-phy-supply = <&vdda_mipi_csi0_0p9>;
 	vdda-pll-supply = <&vdda_mipi_csi_1p25>;
-	//vdda-csi0-supply = <&vdda_mipi_csi0_0p9>;
-	//vdda-csi1-supply = <&vdda_mipi_csi1_0p9>;
-	//vdda-csi2-supply = <&vdda_mipi_csi2_0p9>;
 
-	/*
 	ports {
 		#address-cells = <1>;
 		#size-cells = <0>;
 		port@0 {
 			reg = <0>;
 			csiphy0_ep: endpoint {
-				data-lanes = <0 1>;
+				data-lanes = <0 1 2 3>;
 				remote-endpoint = <&s5k3l6xx_ep>;
 			};
 		};
 	};
-	*/
 };
 
 &cci {
@@ -620,41 +604,48 @@
     };
 };
 */
-/*
-&cci_i2c0 {
-	rear-camera@c {
-		status = "disabled";
-		compatible = "samsung,s5k3l6xx";
-		reg = <0x0c>;
 
-		pinctrl-names = "default";
-		pinctrl-0 = <&cam0_default>;
+&cci_i2c0 {
+	voice_coil_motor: vcm@c {
+		compatible = "dongwoon,dw9714";
+		reg = <0x0c>;
+		vcc-supply = <&vreg_lvs1a_1p8>;
+	};
+
+	s5k3l6xx: rear-camera@10 {
+		status = "okay";
+		compatible = "samsung,s5k3l6xx";
+		reg = <0x10>;
 
 		clocks = <&clock_camcc CAM_CC_MCLK0_CLK>;
 		clock-names = "mclk";
 		clock-frequency = <24000000>;
 
-		power-domains = <&clock_camcc TITAN_TOP_GDSC>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam0_default>;
 
-		rstn-gpios = <&tlmm 23 GPIO_ACTIVE_HIGH>;
+		rstn-gpios = <&tlmm 23 GPIO_ACTIVE_LOW>;
 
 		ldo-supply = <&vreg_l22a_2p85>;
 		vdda-supply = <&cam0_avdd_2v8>;		//analog power 2.8V
-		vddd-supply = <&cam0_dvdd_1v2>;		//VDDD digital power 1.2V, camera expects 0.95V-1.15V
+		vddd-supply = <&cam0_dvdd_1v05>;	//VDDD digital power 1.2V, camera expects 0.95V-1.15V
 		vddio-supply = <&vreg_lvs1a_1p8>;	//I/O power supply 1.8V
 
-		//flash-leds = <&camera_indicator_led>;
+		power-domains = <&clock_camcc TITAN_TOP_GDSC>;
+
+		lens-focus = <&voice_coil_motor>;
 		orientation = <1>;
+		rotation = <0>;
 
 		port {
 			s5k3l6xx_ep: endpoint {
-				data-lanes = <1 2>;
+				data-lanes = <1 2 3 4>;
 				remote-endpoint = <&csiphy0_ep>;
 			};
 		};
 	};
 };
-*/
+
 &cdsp_pas {
 	firmware-name = "qcom/sdm850/HUAWEI/AL09/qccdsp850.mbn";
 	status = "okay";
@@ -715,6 +706,23 @@
 
 		pinctrl-names = "default";
 		pinctrl-0 = <&ec_int_default>;
+
+		connector {
+			compatible = "usb-c-connector";
+
+			/*
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+				port@1 {
+					reg = <1>;
+					planck_ec_dp_in: endpoint {
+						remote-endpoint = <&mdss_dp_out>;
+					};
+				};
+			};
+			*/
+		};
 	};
 };
 
@@ -774,8 +782,28 @@
 	firmware-name = "qcom/sdm850/HUAWEI/AL09/ipa_fws.elf";
 };
 
+&lpasscc {
+	status = "okay";
+};
+
 &mdss {
 	status = "okay";
+};
+
+&mdss_dp {
+	status = "okay";
+	data-lanes = <0 1>;
+
+	/*
+	ports {
+		port@1 {
+			reg = <1>;
+			mdss_dp_out: endpoint {
+				remote-endpoint = <&planck_ec_dp_in>;
+			};
+		};
+	};
+	*/
 };
 
 &mdss_dsi0 {
@@ -800,41 +828,6 @@
 &mss_pil {
 	status = "okay";
 	firmware-name = "qcom/sdm850/HUAWEI/AL09/qcdsp1v2850.mbn", "qcom/sdm850/HUAWEI/AL09/qcdsp2850.mbn";
-};
-
-&pcie0 {
-	status = "okay";
-
-	pinctrl-names = "default";
-	pinctrl-0 = <&pcie0_default>;
-
-	vddpe-3v3-supply = <&pcie0_3p3v_dual>;
-
-	perst-gpios = <&tlmm 35 GPIO_ACTIVE_LOW>;
-	enable-gpios = <&tlmm 134 GPIO_ACTIVE_HIGH>;
-};
-
-&pcie0_phy {
-	vdda-phy-supply = <&vdda_hp_pcie_core>;
-	vdda-pll-supply = <&vdda_hp_pcie_1p2>;
-
-	status = "okay";
-};
-
-&pcie1 {
-	status = "okay";
-
-	pinctrl-names = "default";
-	pinctrl-0 = <&pcie1_default>;
-
-	perst-gpios = <&tlmm 102 GPIO_ACTIVE_LOW>;
-};
-
-&pcie1_phy {
-	vdda-phy-supply = <&vdda_hp_pcie_core>;
-	vdda-pll-supply = <&vdda_hp_pcie_1p2>;
-
-	status = "okay";
 };
 
 &pm8998_gpios {
@@ -908,6 +901,14 @@
 	dai@1 {
 		reg = <1>;
 	};
+
+	dai@2 {
+		reg = <2>;
+	};
+
+	dai@3 {
+		reg = <3>;
+	};
 };
 
 &sdhc_2 {
@@ -933,17 +934,18 @@
 };
 
 &sound {
-	compatible = "qcom,sdm845-sndcard";
+	compatible = "lenovo,yoga-c630-sndcard", "qcom,sdm845-sndcard";
 	model = "HUAWEI-PAK_AL09-M1040";
 
 	status = "okay";
 
 	audio-routing =
 		"RX_BIAS", "MCLK",
+		"AMIC2", "MIC BIAS2",
+		"DMIC2", "MIC BIAS3", /* Digital Mic4 */
+		"DMIC1", "MIC BIAS1", /* Digital Mic5 */
 		"SpkrLeft IN", "SPK1 OUT",
-		"SpkrRight IN", "SPK2 OUT",
-		"MM_DL1",  "MultiMedia1 Playback",
-		"MM_DL2",  "MultiMedia2 Playback";
+		"SpkrRight IN", "SPK2 OUT";
 
 	mm1-dai-link {
 		link-name = "MultiMedia1";
@@ -959,6 +961,20 @@
 		};
 	};
 
+	mm3-dai-link {
+		link-name = "MultiMedia3";
+		cpu {
+			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA3>;
+		};
+	};
+
+	mm4-dai-link {
+		link-name = "MultiMedia4";
+		cpu {
+			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA4>;
+		};
+	};
+
 	slim-dai-link {
 		link-name = "SLIM Playback";
 		cpu {
@@ -971,6 +987,21 @@
 
 		codec {
 			sound-dai = <&left_spkr>, <&right_spkr>, <&swm 0>, <&wcd9340 0>;
+		};
+	};
+
+	slim-wcd-cap-dai-link {
+		link-name = "SLIM WCD Capture";
+		cpu {
+			sound-dai = <&q6afedai SLIMBUS_0_TX>;
+		};
+
+		platform {
+			sound-dai = <&q6routing>;
+		};
+
+		codec {
+			sound-dai = <&wcd9340 1>;
 		};
 	};
 
@@ -993,7 +1024,6 @@
 &tlmm {
 	gpio-reserved-ranges = <0 4>, <81 4>;
 
-	/*
 	cam0_default: cam0_default {
 		rst {
 			pins = "gpio23";
@@ -1011,7 +1041,6 @@
 			bias-disable;
 		};
 	};
-	*/
 
 	cam_indicator_en: cam-indicator-en-state {
 		pins = "gpio12";
@@ -1051,72 +1080,6 @@
 		
 		drive-strength = <2>;
 		bias-disable;
-	};
-
-	pcie0_default: pcie0-default-state {
-		clkreq-pins {
-			pins = "gpio36";
-			function = "pci_e0";
-			bias-pull-up;
-		};
-
-		reset-n-pins {
-			pins = "gpio35";
-			function = "gpio";
-
-			drive-strength = <2>;
-			output-low;
-			bias-pull-down;
-		};
-
-		wake-n-pins {
-		    pins = "gpio37";
-		    function = "gpio";
-
-			drive-strength = <2>;
-		    bias-pull-up;
-	    };
-	};
-
-	pcie0_pwren_state: pcie0-pwren-state {
-		pins = "gpio90";
-		function = "gpio";
-
-		drive-strength = <2>;
-		bias-disable;
-	};
-
-	pcie1_default: pcie1-default-state {
-		perst-n-pins {
-			pins = "gpio102";
-			function = "gpio";
-
-			drive-strength = <16>;
-			bias-disable;
-		};
-
-		clkreq-pins {
-			pins = "gpio103";
-			function = "pci_e1";
-			bias-pull-up;
-		};
-
-		reset-n-pins {
-			pins = "gpio113";
-			function = "gpio";
-
-			drive-strength = <16>;
-			bias-pull-up;
-			output-high;
-		};
-
-		wake-n-pins {
-	    	pins = "gpio104";
-			function = "gpio";
-
-		    drive-strength = <2>;
-		    bias-pull-up;
-	    };
 	};
 
 	sdc2_default_state: sdc2-default-state {
@@ -1252,6 +1215,9 @@
 	qcom,mbhc-buttons-vthreshold-microvolt = <75000 150000 237000 500000 500000 500000 500000 500000>;
 	qcom,mbhc-headset-vthreshold-microvolt = <1700000>;
 	qcom,mbhc-headphone-vthreshold-microvolt = <50000>;
+	qcom,micbias1-microvolt = <1800000>;
+	qcom,micbias2-microvolt = <2700000>;
+	qcom,micbias3-microvolt = <1800000>;
 
 	swm: soundwire@c85 {
 		left_spkr: speaker@0,3 {
@@ -1284,4 +1250,5 @@
 	vdd-3.3-ch1-supply = <&vreg_l23a_3p3>;
 
 	qcom,snoc-host-cap-8bit-quirk;
+	qcom,ath10k-calibration-variant = "Lenovo_C630";
 };
