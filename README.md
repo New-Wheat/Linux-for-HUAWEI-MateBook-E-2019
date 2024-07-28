@@ -18,9 +18,10 @@ Supported features (some require proper firmware files placed in `/lib/firmware`
 - Touchpad
 - UFS
 - SD Card
-- Audio _(**UNSTABLE**, only speakers and headphones work now)_
+- Audio _(**UNSTABLE**, right internal mic and headphone mic not enabled)_
 - Mobile Network
 - Camera Indicator LED  
+- Rear Camera _(autofocus not working)_
 - _**The following features require [huawei-planck-ec](https://gitlab.com/New-Wheat/linux-for-huawei-matebook-e-2019/-/blob/main/drivers/power/supply/huawei-planck-ec.c) driver**_
     - Battery Monitoring
     - Lid
@@ -34,8 +35,7 @@ Supported features (some require proper firmware files placed in `/lib/firmware`
 
 
 - [ ] Camera
-    - front camera: gc5025 (no sensor driver found)
-    - rear camera: s5k3l6 (wip)
+    - front camera: gc5025 (no mainline sensor driver found)
 
 ## Source Code
 
