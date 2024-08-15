@@ -33,9 +33,10 @@ Supported features (some require proper firmware files placed in `/lib/firmware`
 
 ## Todo
 
-
+- [ ] External display _(HPD detection and UCSI need to be implemented in the ec driver)_
 - [ ] Camera
-    - front camera: gc5025 (no mainline sensor driver found)
+    - rear camera actuator: cn3927 (only downstream driver found)
+    - front camera: gc5025 (only downstream driver driver found)
 
 ## Source Code
 
