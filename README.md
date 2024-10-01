@@ -21,8 +21,8 @@ Supported features (some require proper firmware files placed in `/lib/firmware`
 - Audio _(**UNSTABLE**, right internal mic and headphone mic not enabled)_
 - Mobile Network
 - Camera Indicator LED  
-- Rear Camera _(autofocus not working)_
-- _**The following features require [huawei-planck-ec](https://gitlab.com/New-Wheat/linux-for-huawei-matebook-e-2019/-/blob/main/drivers/power/supply/huawei-planck-ec.c) driver**_
+- Rear Camera _(autofocus wip)_
+- _**The following features require [huawei-planck-ec](https://gitlab.com/New-Wheat/linux-for-huawei-matebook-e-2019/-/blob/main/drivers/platform/arm64/huawei-planck-ec.c) driver**_
     - Battery Monitoring
     - Lid
     - Backlight  
@@ -33,7 +33,7 @@ Supported features (some require proper firmware files placed in `/lib/firmware`
 
 ## Todo
 
-- [ ] External display _(HPD detection and UCSI need to be implemented in the ec driver)_
+- [ ] External display _(HPD detection and altmode handling need to be implemented in the ec driver)_
 - [ ] Camera
     - rear camera actuator: cn3927 (only downstream driver found)
     - front camera: gc5025 (only downstream driver driver found)
@@ -46,4 +46,4 @@ s5k3l6 camera sensor driver: https://source.puri.sm/Librem5/linux/-/blob/pureos/
 
 ## Testing Platform
 
-Debian 12 (Linux kernel 6.10)
+Debian 12 (Linux kernel 6.11)
