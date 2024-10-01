@@ -202,6 +202,22 @@
 		vin-supply = <&vreg_s4a_1p8>;
 	};
 
+	cam1_dvdd_1v2: cam1-dvdd-1v2-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "cam1_dvdd_1v2";
+
+		regulator-min-microvolt = <1200000>;
+		regulator-max-microvolt = <1200000>;
+
+		gpio = <&tlmm 60 GPIO_ACTIVE_HIGH>;
+
+		enable-active-high;
+		regulator-boot-on;
+		//regulator-always-on;
+
+		vin-supply = <&vreg_s4a_1p8>;
+	};
+
 	cam0_avdd_2v8: cam0-avdd-2v8-regulator {
 		compatible = "regulator-fixed";
 		regulator-name = "cam0_avdd_2v8";
@@ -210,6 +226,22 @@
 		regulator-max-microvolt = <2800000>;
 
 		gpio = <&tlmm 63 GPIO_ACTIVE_HIGH>;
+
+		enable-active-high;
+		regulator-boot-on;
+		//regulator-always-on;
+
+		vin-supply = <&vph_pwr>;
+	};
+
+	cam1_avdd_2v8: cam1-avdd-2v8-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "cam1_avdd_2v8";
+
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+
+		gpio = <&tlmm 62 GPIO_ACTIVE_HIGH>;
 
 		enable-active-high;
 		regulator-boot-on;
@@ -243,8 +275,7 @@
 			gpios = <&tlmm 12 GPIO_ACTIVE_HIGH>;
 			linux,default-trigger = "none";
 			default-state = "off";
-			/* Reuse as a panic indicator until we get a "camera on" trigger */
-			panic-indicator;
+			panic-indicator;	//Reuse as a panic indicator until we get a "camera on" trigger
 		};
 	};
 };
@@ -297,6 +328,10 @@
 			regulator-min-microvolt = <1800000>;
 			regulator-max-microvolt = <1800000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+
+			enable-active-high;
+			regulator-boot-on;
+			regulator-always-on;
 		};
 
 		vreg_s5a_2p04: smps5 {
@@ -465,11 +500,13 @@
 		};
 
 		vreg_l22a_2p85: ldo22 {
-			regulator-min-microvolt = <2864000>;
-			regulator-max-microvolt = <3312000>;
+			regulator-min-microvolt = <2850000>;
+			regulator-max-microvolt = <2864000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 
+			enable-active-high;
 			regulator-boot-on;
+			regulator-always-on;
 		};
 
 		vreg_l23a_3p3: ldo23 {
@@ -520,7 +557,7 @@
 			regulator-min-microvolt = <1800000>;
 			regulator-max-microvolt = <1800000>;
 			
-			//enable-active-high;
+			enable-active-high;
 			regulator-boot-on;
 			regulator-always-on;
 		};
@@ -528,6 +565,10 @@
 		vreg_lvs2a_1p8: lvs2 {
 			regulator-min-microvolt = <1800000>;
 			regulator-max-microvolt = <1800000>;
+
+			enable-active-high;
+			regulator-boot-on;
+			regulator-always-on;
 		};
 	};
 
@@ -558,58 +599,54 @@
 		#size-cells = <0>;
 		port@0 {
 			reg = <0>;
-			csiphy0_ep: endpoint {
+			csiphy0_in: endpoint {
 				data-lanes = <0 1 2 3>;
-				remote-endpoint = <&s5k3l6xx_ep>;
+				remote-endpoint = <&s5k3l6xx_out>;
 			};
 		};
+
+		/*port@1 {
+			reg = <1>;
+			csiphy1_in: endpoint {
+				data-lanes = <0 1>;
+				remote-endpoint = <&gc5025_out>;
+			};
+		};*/
 	};
 };
 
 &cci {
 	status = "okay";
 };
-/*
-/ {
-    fake-reg-mclk0 {
-        compatible = "regulator-fixed-clock";
-        regulator-name = "fake-reg-mclk0";
-        pinctrl-names = "default";
-        pinctrl-0 = <&cam_mclk0_default>;
-        clocks = <&clock_camcc CAM_CC_MCLK0_CLK>;
-        regulator-always-on;
-    };
-	fake-reg-mclk1 {
-        compatible = "regulator-fixed-clock";
-        regulator-name = "fake-reg-mclk1";
-        pinctrl-names = "default";
-        pinctrl-0 = <&cam_mclk1_default>;
-        clocks = <&clock_camcc CAM_CC_MCLK1_CLK>;
-        regulator-always-on;
-    };
-};
-
-&tlmm {
-    cam_mclk0_default: cam-mclk0-default {
-        pins = "gpio13";
-        function = "cam_mclk";
-        drive-strength = <2>;
-        bias-disable;
-    };
-	cam_mclk1_default: cam-mclk1-default {
-        pins = "gpio15";
-        function = "cam_mclk";
-        drive-strength = <2>;
-        bias-disable;
-    };
-};
-*/
 
 &cci_i2c0 {
-	voice_coil_motor: vcm@c {
-		compatible = "dongwoon,dw9714";
+	cn3927v: vcm@c {
+		status = "okay";
+		compatible = "chipnext,cn3927v";
 		reg = <0x0c>;
-		vcc-supply = <&vreg_lvs1a_1p8>;
+
+		xsd-gpios = <&tlmm 28 GPIO_ACTIVE_HIGH>;
+		avdd-supply = <&vreg_l22a_2p85>;
+
+		/*rockchip,vcm-max-current = <120>;
+		rockchip,vcm-start-current = <30>;
+		rockchip,vcm-rated-current = <80>;*/
+		rockchip,vcm-step-mode = <0x8>;
+		rockchip,vcm-edlc-enable = <0>;
+		rockchip,vcm-dlc-enable = <0>;
+		rockchip,vcm-mclk = <1>;
+		rockchip,vcm-t-src = <0>;
+		rockchip,vcm-adcanced-mode = <0>;
+		rockchip,vcm-sac-mode = <0x03>;
+		rockchip,vcm-sac-time = <0x28>;
+		rockchip,vcm-prescl = <0x02>;
+		rockchip,vcm-nrc-en = <1>;
+		rockchip,vcm-nrc-mode = <1>;
+		rockchip,vcm-nrc-preset = <0x11110000>;
+		rockchip,vcm-nrc-infl = <0x01>;
+		rockchip,vcm-nrc-time = <0>;
+		rockchip,camera-module-index = <0>;
+		rockchip,camera-module-facing = "back";
 	};
 
 	s5k3l6xx: rear-camera@10 {
@@ -626,26 +663,89 @@
 
 		rstn-gpios = <&tlmm 23 GPIO_ACTIVE_LOW>;
 
-		ldo-supply = <&vreg_l22a_2p85>;
 		vdda-supply = <&cam0_avdd_2v8>;		//analog power 2.8V
 		vddd-supply = <&cam0_dvdd_1v05>;	//VDDD digital power 1.2V, camera expects 0.95V-1.15V
 		vddio-supply = <&vreg_lvs1a_1p8>;	//I/O power supply 1.8V
 
-		power-domains = <&clock_camcc TITAN_TOP_GDSC>;
-
-		lens-focus = <&voice_coil_motor>;
+		rockchip,camera-module-index = <0>;
+		lens-focus = <&cn3927v>;
 		orientation = <1>;
 		rotation = <0>;
 
 		port {
-			s5k3l6xx_ep: endpoint {
+			s5k3l6xx_out: endpoint {
 				data-lanes = <1 2 3 4>;
-				remote-endpoint = <&csiphy0_ep>;
+				remote-endpoint = <&csiphy0_in>;
 			};
 		};
 	};
-};
 
+	/*s5k3l6: rear-camera@10 {
+		compatible = "samsung,s5k3l6";
+		reg = <0x10>;
+		clocks = <&clock_camcc CAM_CC_MCLK0_CLK>;
+		clock-names = "xvclk";
+		clock-frequency = <24000000>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam0_default>;
+		// power-gpios = <&gpio1 RK_PB3 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&tlmm 23 GPIO_ACTIVE_LOW>;
+		//pwdn-gpios = <&gpio1 RK_PA0 GPIO_ACTIVE_HIGH>;
+		avdd-supply = <&cam0_avdd_2v8>;
+		dvdd-supply = <&cam0_dvdd_1v05>;
+		dovdd-supply = <&vreg_lvs1a_1p8>;
+		rockchip,camera-module-index = <0>;
+		rockchip,camera-module-facing = "back";
+		rockchip,camera-module-name = "null";
+		rockchip,camera-module-lens-name = "null";
+		lens-focus = <&cn3927v>;
+		port {
+			s5k3l6xx_out: endpoint {
+				remote-endpoint = <&csiphy0_in>;
+				data-lanes = <1 2 3 4>;
+			};
+		};
+	};*/
+};
+/*
+&cci_i2c1 {
+	front-camera@36 {
+		status = "okay";
+		compatible = "galaxycore,gc5025";
+        reg = <0x36>;
+
+		clocks = <&clock_camcc CAM_CC_MCLK1_CLK>;
+		clock-names = "xvclk";
+		clock-frequency = <24000000>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam1_default>;
+
+		reset-gpios = <&tlmm 9 GPIO_ACTIVE_LOW>;
+
+		avdd-supply = <&cam1_avdd_2v8>;
+		dvdd-supply = <&cam1_dvdd_1v2>;
+		dovdd-supply = <&vreg_lvs2a_1p8>;
+
+		power-domains = <&clock_camcc TITAN_TOP_GDSC>;
+
+		rockchip,camera-module-index = <1>;
+		rockchip,camera-module-facing = "front";
+		rockchip,camera-module-name = "null";
+		rockchip,camera-module-lens-name = "null";
+		orientation = <0>;
+		rotation = <0>;
+
+		port {
+			gc5025_out: endpoint {
+				remote-endpoint = <&csiphy1_in>;
+				data-lanes = <1 2>;
+			};
+		};
+	};
+    
+};
+*/
 &cdsp_pas {
 	firmware-name = "qcom/sdm850/HUAWEI/AL09/qccdsp850.mbn";
 	status = "okay";
@@ -702,6 +802,7 @@
 		reg = <0x76>;
 
 		interrupts-extended = <&tlmm 24 IRQ_TYPE_LEVEL_LOW>;
+		//hpd-gpios = <&tlmm 113 GPIO_ACTIVE_HIGH>;
 		wakeup-source;
 
 		pinctrl-names = "default";
@@ -709,19 +810,48 @@
 
 		connector {
 			compatible = "usb-c-connector";
+			power-role = "dual";
+			data-role = "host";
 
+			/*ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+
+					ucsi0_hs_in: endpoint {
+						remote-endpoint = <&usb_1_dwc3_hs>;
+					};
+				};
+
+				port@1 {
+					reg = <1>;
+
+					ucsi0_ss_in: endpoint {
+						remote-endpoint = <&usb_1_qmpphy_out>;
+					};
+				};
+
+				port@2 {
+					reg = <2>;
+
+					ucsi0_sbu: endpoint {
+					};
+				};
+			};*/
 			/*
 			ports {
 				#address-cells = <1>;
 				#size-cells = <0>;
+
 				port@1 {
-					reg = <1>;
-					planck_ec_dp_in: endpoint {
+				 reg = <1>;
+					ec_dp_in: endpoint {
 						remote-endpoint = <&mdss_dp_out>;
 					};
 				};
-			};
-			*/
+			};*/
 		};
 	};
 };
@@ -791,19 +921,31 @@
 };
 
 &mdss_dp {
-	status = "okay";
+	status = "disabled";
+
+	vdda-1p2-supply = <&vreg_l26a_1p2>;
+	vdda-0p9-supply = <&vreg_l1a_0p875>;
+
+	#sound-dai-cells = <0>;
 	data-lanes = <0 1>;
 
+	/*ports {
+		port@1 {
+			reg = <1>;
+			mdss_dp_out: endpoint {
+				remote-endpoint = <&usb_1_qmpphy_dp_in>;
+			};
+		};
+	};*/
 	/*
 	ports {
 		port@1 {
 			reg = <1>;
 			mdss_dp_out: endpoint {
-				remote-endpoint = <&planck_ec_dp_in>;
+				remote-endpoint = <&ec_dp_in>;
 			};
 		};
-	};
-	*/
+	};*/
 };
 
 &mdss_dsi0 {
@@ -909,6 +1051,10 @@
 	dai@3 {
 		reg = <3>;
 	};
+
+	dai@4 {
+		reg = <4>;
+	};
 };
 
 &sdhc_2 {
@@ -943,7 +1089,7 @@
 		"RX_BIAS", "MCLK",
 		"AMIC2", "MIC BIAS2",
 		"DMIC2", "MIC BIAS3", /* Digital Mic4 */
-		"DMIC1", "MIC BIAS1", /* Digital Mic5 */
+		"DMIC0", "MIC BIAS1", /* Digital Mic5 */
 		"SpkrLeft IN", "SPK1 OUT",
 		"SpkrRight IN", "SPK2 OUT";
 
@@ -972,6 +1118,13 @@
 		link-name = "MultiMedia4";
 		cpu {
 			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA4>;
+		};
+	};
+
+	mm5-dai-link {
+		link-name = "MultiMedia5";
+		cpu {
+			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA5>;
 		};
 	};
 
@@ -1019,6 +1172,21 @@
 			sound-dai = <&wcd9340 2>;
 		};
 	};
+
+	/*displayport-dai-link {
+		link-name = "DisplayPort Playback";
+		cpu {
+			sound-dai = <&q6afedai DISPLAY_PORT_RX>;
+		};
+
+		platform {
+			sound-dai = <&q6routing>;
+		};
+
+		codec {
+			sound-dai = <&mdss_dp>;
+		};
+	};*/
 };
 
 &tlmm {
@@ -1038,6 +1206,24 @@
 			function = "cam_mclk";
 
 			drive-strength = <2>;
+			bias-disable;
+		};
+	};
+
+	cam1_default: cam1_default {
+		rst {
+			pins = "gpio9";
+			function = "gpio";
+
+			drive-strength = <2>;
+			bias-disable;
+		};
+
+		mclk1 {
+			pins = "gpio14";
+			function = "cam_mclk";
+
+			drive-strength = <16>;
 			bias-disable;
 		};
 	};
@@ -1075,11 +1261,21 @@
 	};
 
 	ec_int_default: ec-int-default-state {
-		pins = "gpio24";
-		function = "gpio";
-		
-		drive-strength = <2>;
-		bias-disable;
+		irq {
+			pins = "gpio24";
+			function = "gpio";
+
+			drive-strength = <2>;
+			input-enable;
+			bias-disable;
+		};
+
+		hpd {
+			pins = "gpio113";
+			function = "gpio";
+
+			bias-disable;
+		};
 	};
 
 	sdc2_default_state: sdc2-default-state {
@@ -1152,6 +1348,27 @@
 
 &usb_1_dwc3 {
 	dr_mode = "host";
+
+	/*ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+
+			usb_1_dwc3_hs: endpoint {
+				remote-endpoint = <&ucsi0_hs_in>;
+			};
+		};
+
+		port@1 {
+			reg = <1>;
+
+			usb_1_dwc3_ss: endpoint {
+				remote-endpoint = <&usb_1_qmpphy_usb_ss_in>;
+			};
+		};
+	};*/
 };
 
 &usb_1_hsphy {
@@ -1172,6 +1389,37 @@
 
 	vdda-phy-supply = <&vdda_usb1_ss_1p2>;
 	vdda-pll-supply = <&vdda_usb1_ss_core>;
+
+	orientation-switch;
+
+	/*ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+
+			usb_1_qmpphy_out: endpoint {
+				remote-endpoint = <&ucsi0_ss_in>;
+			};
+		};
+
+		port@1 {
+			reg = <1>;
+
+			usb_1_qmpphy_usb_ss_in: endpoint {
+				remote-endpoint = <&usb_1_dwc3_ss>;
+			};
+		};
+
+		port@2 {
+			reg = <2>;
+
+			usb_1_qmpphy_dp_in: endpoint {
+				remote-endpoint = <&mdss_dp_out>;
+			};
+		};
+	};*/
 };
 
 &usb_2 {
