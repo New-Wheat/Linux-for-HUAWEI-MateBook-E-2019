@@ -21,7 +21,7 @@ Supported features (some require proper firmware files placed in `/lib/firmware`
 - Audio _(**UNSTABLE**, right internal mic and headphone mic not enabled)_
 - Mobile Network
 - Camera Indicator LED  
-- Rear Camera
+- Rear Camera _(VCM driver for the actuator is [here](https://gitlab.com/New-Wheat/linux-for-huawei-matebook-e-2019/-/blob/main/drivers/media/i2c/cn3927e.c))_
 - _**The following features require [huawei-planck-ec](https://gitlab.com/New-Wheat/linux-for-huawei-matebook-e-2019/-/blob/main/drivers/platform/arm64/huawei-planck-ec.c) driver**_
     - Battery Monitoring
     - Lid
