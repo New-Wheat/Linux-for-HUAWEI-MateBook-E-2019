@@ -21,7 +21,7 @@ Supported features (some require proper firmware files placed in `/lib/firmware`
 - Audio _(**UNSTABLE**, right internal mic and headphone mic not enabled)_
 - Mobile Network
 - Camera Indicator LED  
-- Rear Camera _(autofocus wip)_
+- Rear Camera
 - _**The following features require [huawei-planck-ec](https://gitlab.com/New-Wheat/linux-for-huawei-matebook-e-2019/-/blob/main/drivers/platform/arm64/huawei-planck-ec.c) driver**_
     - Battery Monitoring
     - Lid
@@ -35,7 +35,6 @@ Supported features (some require proper firmware files placed in `/lib/firmware`
 
 - [ ] External display _(HPD detection and altmode handling need to be implemented in the ec driver)_
 - [ ] Camera
-    - rear camera actuator: cn3927 (only downstream driver found)
     - front camera: gc5025 (only downstream driver driver found)
 
 ## Source Code
