@@ -620,33 +620,12 @@
 };
 
 &cci_i2c0 {
-	cn3927v: vcm@c {
+	cn3927e: vcm@c {
 		status = "okay";
-		compatible = "chipnext,cn3927v";
+		compatible = "chipnext,cn3927e";
 		reg = <0x0c>;
 
-		xsd-gpios = <&tlmm 28 GPIO_ACTIVE_HIGH>;
-		avdd-supply = <&vreg_l22a_2p85>;
-
-		/*rockchip,vcm-max-current = <120>;
-		rockchip,vcm-start-current = <30>;
-		rockchip,vcm-rated-current = <80>;*/
-		rockchip,vcm-step-mode = <0x8>;
-		rockchip,vcm-edlc-enable = <0>;
-		rockchip,vcm-dlc-enable = <0>;
-		rockchip,vcm-mclk = <1>;
-		rockchip,vcm-t-src = <0>;
-		rockchip,vcm-adcanced-mode = <0>;
-		rockchip,vcm-sac-mode = <0x03>;
-		rockchip,vcm-sac-time = <0x28>;
-		rockchip,vcm-prescl = <0x02>;
-		rockchip,vcm-nrc-en = <1>;
-		rockchip,vcm-nrc-mode = <1>;
-		rockchip,vcm-nrc-preset = <0x11110000>;
-		rockchip,vcm-nrc-infl = <0x01>;
-		rockchip,vcm-nrc-time = <0>;
-		rockchip,camera-module-index = <0>;
-		rockchip,camera-module-facing = "back";
+		vcc-supply = <&vreg_l22a_2p85>;
 	};
 
 	s5k3l6xx: rear-camera@10 {
@@ -667,8 +646,7 @@
 		vddd-supply = <&cam0_dvdd_1v05>;	//VDDD digital power 1.2V, camera expects 0.95V-1.15V
 		vddio-supply = <&vreg_lvs1a_1p8>;	//I/O power supply 1.8V
 
-		rockchip,camera-module-index = <0>;
-		lens-focus = <&cn3927v>;
+		lens-focus = <&cn3927e>;
 		orientation = <1>;
 		rotation = <0>;
 
