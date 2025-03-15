@@ -1,1 +1,1 @@
-Here are working linux kernel with a few patches. Feel free to use it :)
+Here are compiled devicetree blob and working linux kernel with a few patches. Feel free to use them :)

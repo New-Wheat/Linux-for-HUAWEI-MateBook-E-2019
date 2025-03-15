@@ -12,7 +12,8 @@
 
 #define CN3927E_NAME		"cn3927e"
 #define CN3927E_MAX_FOCUS_POS	1023
-/*e * This sets the minimum granularity for the focus positions.
+/*
+ * This sets the minimum granularity for the focus positions.
  * A value of 1 gives maximum accuracy for a desired focus position
  */
 #define CN3927E_FOCUS_STEPS	1

@@ -14,6 +14,7 @@
 #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
 #include <dt-bindings/sound/qcom,q6afe.h>
 #include <dt-bindings/sound/qcom,q6asm.h>
+#include <dt-bindings/sound/qcom,wcd934x.h>
 #include "sdm850.dtsi"
 #include "sdm845-wcd9340.dtsi"
 #include "pm8998.dtsi"
@@ -35,7 +36,7 @@
 
 / {
 	model = "HUAWEI MateBook E (2019)";
-	compatible = "huawei,planck", "qcom,sdm845";
+	compatible = "lenovo,flex-5g", "qcom,sdm845";
 	chassis-type = "convertible";
 
 	aliases {
@@ -44,7 +45,7 @@
 	};
 
 	chosen {
-		stdout-path = "serial0:115200n8";
+		// stdout-path = "serial0:115200n8";
 	};
 
 	gpio-keys {
@@ -80,7 +81,7 @@
 		};
 
 		cont_splash_mem: cont-splash-mem@80100000 {
-			reg = <0x0 0x80100000 0x0 0xd00000>;
+			reg = <0 0x80100000 0 0xd00000>;
 			no-map;
 		};
 
@@ -197,7 +198,6 @@
 
 		enable-active-high;
 		regulator-boot-on;
-		//regulator-always-on;
 
 		vin-supply = <&vreg_s4a_1p8>;
 	};
@@ -213,7 +213,6 @@
 
 		enable-active-high;
 		regulator-boot-on;
-		//regulator-always-on;
 
 		vin-supply = <&vreg_s4a_1p8>;
 	};
@@ -229,7 +228,6 @@
 
 		enable-active-high;
 		regulator-boot-on;
-		//regulator-always-on;
 
 		vin-supply = <&vph_pwr>;
 	};
@@ -245,12 +243,11 @@
 
 		enable-active-high;
 		regulator-boot-on;
-		//regulator-always-on;
 
 		vin-supply = <&vph_pwr>;
 	};
 
-	panel: panel {
+	panel {
 		compatible = "innolux,p120zdg-bf1";
 		power-supply = <&vlcm_3v3>;
 		no-hpd;
@@ -504,8 +501,6 @@
 			regulator-max-microvolt = <2864000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 
-			enable-active-high;
-			regulator-boot-on;
 			regulator-always-on;
 		};
 
@@ -556,19 +551,13 @@
 		vreg_lvs1a_1p8: lvs1 {
 			regulator-min-microvolt = <1800000>;
 			regulator-max-microvolt = <1800000>;
-			
-			enable-active-high;
-			regulator-boot-on;
+
 			regulator-always-on;
 		};
 
 		vreg_lvs2a_1p8: lvs2 {
 			regulator-min-microvolt = <1800000>;
 			regulator-max-microvolt = <1800000>;
-
-			enable-active-high;
-			regulator-boot-on;
-			regulator-always-on;
 		};
 	};
 
@@ -588,6 +577,10 @@
 	};
 };
 
+&apps_smmu {
+	/delete-property/ dma-coherent;
+};
+
 &camss {
 	status = "okay";
 
@@ -600,18 +593,18 @@
 		port@0 {
 			reg = <0>;
 			csiphy0_in: endpoint {
-				data-lanes = <0 1 2 3>;
+				data-lanes = <0 1>;
 				remote-endpoint = <&s5k3l6xx_out>;
 			};
 		};
 
-		/*port@1 {
+		port@1 {
 			reg = <1>;
 			csiphy1_in: endpoint {
 				data-lanes = <0 1>;
 				remote-endpoint = <&gc5025_out>;
 			};
-		};*/
+		};
 	};
 };
 
@@ -625,7 +618,7 @@
 		compatible = "chipnext,cn3927e";
 		reg = <0x0c>;
 
-		vcc-supply = <&vreg_l22a_2p85>;
+		vcc-supply = <&vreg_lvs1a_1p8>;
 	};
 
 	s5k3l6xx: rear-camera@10 {
@@ -642,9 +635,9 @@
 
 		rstn-gpios = <&tlmm 23 GPIO_ACTIVE_LOW>;
 
-		vdda-supply = <&cam0_avdd_2v8>;		//analog power 2.8V
-		vddd-supply = <&cam0_dvdd_1v05>;	//VDDD digital power 1.2V, camera expects 0.95V-1.15V
-		vddio-supply = <&vreg_lvs1a_1p8>;	//I/O power supply 1.8V
+		vdda-supply = <&cam0_avdd_2v8>;
+		vddd-supply = <&cam0_dvdd_1v05>;
+		vddio-supply = <&vreg_lvs1a_1p8>;
 
 		lens-focus = <&cn3927e>;
 		orientation = <1>;
@@ -652,42 +645,51 @@
 
 		port {
 			s5k3l6xx_out: endpoint {
-				data-lanes = <1 2 3 4>;
+				data-lanes = <1 2>;
 				remote-endpoint = <&csiphy0_in>;
 			};
 		};
 	};
 
-	/*s5k3l6: rear-camera@10 {
-		compatible = "samsung,s5k3l6";
-		reg = <0x10>;
-		clocks = <&clock_camcc CAM_CC_MCLK0_CLK>;
-		clock-names = "xvclk";
-		clock-frequency = <24000000>;
-		pinctrl-names = "default";
-		pinctrl-0 = <&cam0_default>;
-		// power-gpios = <&gpio1 RK_PB3 GPIO_ACTIVE_HIGH>;
-		reset-gpios = <&tlmm 23 GPIO_ACTIVE_LOW>;
-		//pwdn-gpios = <&gpio1 RK_PA0 GPIO_ACTIVE_HIGH>;
-		avdd-supply = <&cam0_avdd_2v8>;
-		dvdd-supply = <&cam0_dvdd_1v05>;
-		dovdd-supply = <&vreg_lvs1a_1p8>;
-		rockchip,camera-module-index = <0>;
-		rockchip,camera-module-facing = "back";
-		rockchip,camera-module-name = "null";
-		rockchip,camera-module-lens-name = "null";
-		lens-focus = <&cn3927v>;
-		port {
-			s5k3l6xx_out: endpoint {
-				remote-endpoint = <&csiphy0_in>;
-				data-lanes = <1 2 3 4>;
-			};
-		};
-	};*/
+	// s5k3l6: rear-camera@10 {
+	// 	status = "okay";
+	// 	compatible = "samsung,s5k3l6";
+	// 	reg = <0x10>;
+
+	// 	clocks = <&clock_camcc CAM_CC_MCLK0_CLK>;
+	// 	clock-names = "xvclk";
+	// 	clock-frequency = <24000000>;
+
+	// 	pinctrl-names = "default";
+	// 	pinctrl-0 = <&cam0_default>;
+
+	// 	reset-gpios = <&tlmm 23 GPIO_ACTIVE_LOW>;
+
+	// 	avdd-supply = <&cam0_avdd_2v8>;
+	// 	dvdd-supply = <&cam0_dvdd_1v05>;
+	// 	dovdd-supply = <&vreg_lvs1a_1p8>;
+
+	// 	lens-focus = <&cn3927e>;
+	// 	orientation = <1>;
+	// 	rotation = <0>;
+
+	// 	port {
+	// 		s5k3l6xx_out: endpoint {
+	// 			data-lanes = <1 2>;
+	// 			remote-endpoint = <&csiphy0_in>;
+	// 		};
+	// 	};
+	// };
+
+	eeprom@50 {
+		compatible = "atmel,24c02";
+		reg = <0x50>;
+		read-only;
+	};
 };
-/*
+
 &cci_i2c1 {
-	front-camera@36 {
+	gc5025: front-camera@36 {
 		status = "okay";
 		compatible = "galaxycore,gc5025";
         reg = <0x36>;
@@ -703,14 +705,8 @@
 
 		avdd-supply = <&cam1_avdd_2v8>;
 		dvdd-supply = <&cam1_dvdd_1v2>;
-		dovdd-supply = <&vreg_lvs2a_1p8>;
+		dovdd-supply = <&vreg_lvs1a_1p8>;
 
-		power-domains = <&clock_camcc TITAN_TOP_GDSC>;
-
-		rockchip,camera-module-index = <1>;
-		rockchip,camera-module-facing = "front";
-		rockchip,camera-module-name = "null";
-		rockchip,camera-module-lens-name = "null";
 		orientation = <0>;
 		rotation = <0>;
 
@@ -721,9 +717,8 @@
 			};
 		};
 	};
-    
 };
-*/
+
 &cdsp_pas {
 	firmware-name = "qcom/sdm850/HUAWEI/AL09/qccdsp850.mbn";
 	status = "okay";
@@ -735,10 +730,6 @@
 			   <GCC_QSPI_CNOC_PERIPH_AHB_CLK>,
 			   <GCC_LPASS_Q6_AXI_CLK>,
 			   <GCC_LPASS_SWAY_CLK>;
-};
-
-&gmu {
-	status = "okay";
 };
 
 &gpu {
@@ -780,7 +771,6 @@
 		reg = <0x76>;
 
 		interrupts-extended = <&tlmm 24 IRQ_TYPE_LEVEL_LOW>;
-		//hpd-gpios = <&tlmm 113 GPIO_ACTIVE_HIGH>;
 		wakeup-source;
 
 		pinctrl-names = "default";
@@ -791,7 +781,7 @@
 			power-role = "dual";
 			data-role = "host";
 
-			/*ports {
+			ports {
 				#address-cells = <1>;
 				#size-cells = <0>;
 
@@ -817,19 +807,7 @@
 					ucsi0_sbu: endpoint {
 					};
 				};
-			};*/
-			/*
-			ports {
-				#address-cells = <1>;
-				#size-cells = <0>;
-
-				port@1 {
-				 reg = <1>;
-					ec_dp_in: endpoint {
-						remote-endpoint = <&mdss_dp_out>;
-					};
-				};
-			};*/
+			};
 		};
 	};
 };
@@ -899,31 +877,13 @@
 };
 
 &mdss_dp {
-	status = "disabled";
+	status = "okay";
 
 	vdda-1p2-supply = <&vreg_l26a_1p2>;
 	vdda-0p9-supply = <&vreg_l1a_0p875>;
 
 	#sound-dai-cells = <0>;
 	data-lanes = <0 1>;
-
-	/*ports {
-		port@1 {
-			reg = <1>;
-			mdss_dp_out: endpoint {
-				remote-endpoint = <&usb_1_qmpphy_dp_in>;
-			};
-		};
-	};*/
-	/*
-	ports {
-		port@1 {
-			reg = <1>;
-			mdss_dp_out: endpoint {
-				remote-endpoint = <&ec_dp_in>;
-			};
-		};
-	};*/
 };
 
 &mdss_dsi0 {
@@ -1066,8 +1026,10 @@
 	audio-routing =
 		"RX_BIAS", "MCLK",
 		"AMIC2", "MIC BIAS2",
-		"DMIC2", "MIC BIAS3", /* Digital Mic4 */
-		"DMIC0", "MIC BIAS1", /* Digital Mic5 */
+		"DMIC0", "MCLK",	/* Bottom Mic */
+		"DMIC0", "MIC BIAS1",
+		"DMIC2", "MCLK",	/* Top Mic */
+		"DMIC2", "MIC BIAS3",
 		"SpkrLeft IN", "SPK1 OUT",
 		"SpkrRight IN", "SPK2 OUT";
 
@@ -1117,12 +1079,12 @@
 		};
 
 		codec {
-			sound-dai = <&left_spkr>, <&right_spkr>, <&swm 0>, <&wcd9340 0>;
+			sound-dai = <&left_spkr>, <&right_spkr>, <&swm 0>, <&wcd9340 AIF1_PB>;
 		};
 	};
 
-	slim-wcd-cap-dai-link {
-		link-name = "SLIM WCD Capture";
+	slim-cap-dai-link {
+		link-name = "SLIM Capture";
 		cpu {
 			sound-dai = <&q6afedai SLIMBUS_0_TX>;
 		};
@@ -1132,7 +1094,7 @@
 		};
 
 		codec {
-			sound-dai = <&wcd9340 1>;
+			sound-dai = <&wcd9340 AIF1_CAP>;
 		};
 	};
 
@@ -1147,11 +1109,26 @@
 		};
 
 		codec {
-			sound-dai = <&wcd9340 2>;
+			sound-dai = <&wcd9340 AIF2_PB>;
 		};
 	};
 
-	/*displayport-dai-link {
+	// slim-wcd-cap-dai-link {
+	// 	link-name = "SLIM WCD Capture";
+	// 	cpu {
+	// 		sound-dai = <&q6afedai SLIMBUS_0_TX>;
+	// 	};
+
+	// 	platform {
+	// 		sound-dai = <&q6routing>;
+	// 	};
+
+	// 	codec {
+	// 		sound-dai = <&wcd9340 AIF2_CAP>;
+	// 	};
+	// };
+
+	displayport-dai-link {
 		link-name = "DisplayPort Playback";
 		cpu {
 			sound-dai = <&q6afedai DISPLAY_PORT_RX>;
@@ -1164,7 +1141,7 @@
 		codec {
 			sound-dai = <&mdss_dp>;
 		};
-	};*/
+	};
 };
 
 &tlmm {
@@ -1201,7 +1178,7 @@
 			pins = "gpio14";
 			function = "cam_mclk";
 
-			drive-strength = <16>;
+			drive-strength = <2>;
 			bias-disable;
 		};
 	};
@@ -1239,21 +1216,12 @@
 	};
 
 	ec_int_default: ec-int-default-state {
-		irq {
-			pins = "gpio24";
-			function = "gpio";
+		pins = "gpio24";
+		function = "gpio";
 
-			drive-strength = <2>;
-			input-enable;
-			bias-disable;
-		};
-
-		hpd {
-			pins = "gpio113";
-			function = "gpio";
-
-			bias-disable;
-		};
+		drive-strength = <2>;
+		input-enable;
+		bias-disable;
 	};
 
 	sdc2_default_state: sdc2-default-state {
@@ -1326,27 +1294,10 @@
 
 &usb_1_dwc3 {
 	dr_mode = "host";
+};
 
-	/*ports {
-		#address-cells = <1>;
-		#size-cells = <0>;
-
-		port@0 {
-			reg = <0>;
-
-			usb_1_dwc3_hs: endpoint {
-				remote-endpoint = <&ucsi0_hs_in>;
-			};
-		};
-
-		port@1 {
-			reg = <1>;
-
-			usb_1_dwc3_ss: endpoint {
-				remote-endpoint = <&usb_1_qmpphy_usb_ss_in>;
-			};
-		};
-	};*/
+&usb_1_dwc3_hs {
+	remote-endpoint = <&ucsi0_hs_in>;
 };
 
 &usb_1_hsphy {
@@ -1367,37 +1318,10 @@
 
 	vdda-phy-supply = <&vdda_usb1_ss_1p2>;
 	vdda-pll-supply = <&vdda_usb1_ss_core>;
+};
 
-	orientation-switch;
-
-	/*ports {
-		#address-cells = <1>;
-		#size-cells = <0>;
-
-		port@0 {
-			reg = <0>;
-
-			usb_1_qmpphy_out: endpoint {
-				remote-endpoint = <&ucsi0_ss_in>;
-			};
-		};
-
-		port@1 {
-			reg = <1>;
-
-			usb_1_qmpphy_usb_ss_in: endpoint {
-				remote-endpoint = <&usb_1_dwc3_ss>;
-			};
-		};
-
-		port@2 {
-			reg = <2>;
-
-			usb_1_qmpphy_dp_in: endpoint {
-				remote-endpoint = <&mdss_dp_out>;
-			};
-		};
-	};*/
+&usb_1_qmpphy_out {
+	remote-endpoint = <&ucsi0_ss_in>;
 };
 
 &usb_2 {

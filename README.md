@@ -25,7 +25,8 @@ Supported features (some require proper firmware files placed in `/lib/firmware`
 - _**The following features require [huawei-planck-ec](https://gitlab.com/New-Wheat/linux-for-huawei-matebook-e-2019/-/blob/main/drivers/platform/arm64/huawei-planck-ec.c) driver**_
     - Battery Monitoring
     - Lid
-    - Backlight  
+    - Backlight
+    - USCI 
 - _**The following features require libssc and hexagonrpcd (See [here](https://gitlab.com/postmarketOS/pmaports/-/merge_requests/4050))**_
     - Accelerometer
     - Ambient Light Sensor
@@ -33,16 +34,16 @@ Supported features (some require proper firmware files placed in `/lib/firmware`
 
 ## Todo
 
-- [ ] External display _(HPD detection and altmode handling need to be implemented in the ec driver)_
+- [ ] External display _(video output via USB-C currently works very badly)_
 - [ ] Camera
-    - front camera: gc5025 (only downstream driver driver found)
+    - front camera: gc5025 (only downstream driver found)
 
 ## Source Code
 
 Linux kernel source code: https://gitlab.com/sdm845-mainline/linux
 
-s5k3l6 camera sensor driver: https://source.puri.sm/Librem5/linux/-/blob/pureos/latest/drivers/media/i2c/s5k3l6xx.c
+s5k3l6 camera sensor driver: https://source.puri.sm/sebastian.krzyszkowiak/linux-next/-/blob/dos-6.9/drivers/media/i2c/s5k3l6xx.c
 
 ## Testing Platform
 
-Debian 12 (Linux kernel 6.11)
+Debian 12 (Linux kernel 6.14-rc5)
