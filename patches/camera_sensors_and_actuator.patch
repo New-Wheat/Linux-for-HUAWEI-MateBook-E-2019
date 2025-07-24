@@ -1,0 +1,5118 @@
+diff -Naur linux/drivers/media/i2c/cn3927e.c orig-linux-sdm845-6.16-dev/drivers/media/i2c/cn3927e.c
+--- linux/drivers/media/i2c/cn3927e.c	1970-01-01 08:00:00.000000000 +0800
++++ orig-linux-sdm845-6.16-dev/drivers/media/i2c/cn3927e.c	2025-01-09 18:05:33.707901200 +0800
+@@ -0,0 +1,313 @@
++// SPDX-License-Identifier: GPL-2.0
++// based on dw9714.c
++
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/pm_runtime.h>
++#include <linux/regulator/consumer.h>
++#include <media/v4l2-ctrls.h>
++#include <media/v4l2-device.h>
++#include <media/v4l2-event.h>
++
++#define CN3927E_NAME		"cn3927e"
++#define CN3927E_MAX_FOCUS_POS	1023
++/*
++ * This sets the minimum granularity for the focus positions.
++ * A value of 1 gives maximum accuracy for a desired focus position
++ */
++#define CN3927E_FOCUS_STEPS	1
++/*
++ * This acts as the minimum granularity of lens movement.
++ * Keep this value power of 2, so the control steps can be
++ * uniformly adjusted for gradual lens movement, with desired
++ * number of control steps.
++ */
++#define CN3927E_CTRL_STEPS	16
++#define CN3927E_CTRL_DELAY_US	1000
++/*
++ * S[3:2] = 0x00, codes per step for "Linear Slope Control"
++ * S[1:0] = 0x00, step period
++ */
++#define CN3927E_DEFAULT_S 0x0
++#define CN3927E_VAL(data, s) ((data) << 4 | (s))
++
++/* cn3927e device structure */
++struct cn3927e_device {
++	struct v4l2_ctrl_handler ctrls_vcm;
++	struct v4l2_subdev sd;
++	u16 current_val;
++	struct regulator *vcc;
++};
++
++static inline struct cn3927e_device *to_cn3927e_vcm(struct v4l2_ctrl *ctrl)
++{
++	return container_of(ctrl->handler, struct cn3927e_device, ctrls_vcm);
++}
++
++static inline struct cn3927e_device *sd_to_cn3927e_vcm(struct v4l2_subdev *subdev)
++{
++	return container_of(subdev, struct cn3927e_device, sd);
++}
++
++static int cn3927e_i2c_write(struct i2c_client *client, u16 data)
++{
++	int ret;
++	__be16 val = cpu_to_be16(data);
++
++	ret = i2c_master_send(client, (const char *)&val, sizeof(val));
++	if (ret != sizeof(val)) {
++		dev_err(&client->dev, "I2C write fail\n");
++		return -EIO;
++	}
++	return 0;
++}
++
++static int cn3927e_t_focus_vcm(struct cn3927e_device *cn3927e_dev, u16 val)
++{
++	struct i2c_client *client = v4l2_get_subdevdata(&cn3927e_dev->sd);
++
++	cn3927e_dev->current_val = val;
++
++	return cn3927e_i2c_write(client, CN3927E_VAL(val, CN3927E_DEFAULT_S));
++}
++
++static int cn3927e_set_ctrl(struct v4l2_ctrl *ctrl)
++{
++	struct cn3927e_device *dev_vcm = to_cn3927e_vcm(ctrl);
++
++	if (ctrl->id == V4L2_CID_FOCUS_ABSOLUTE)
++		return cn3927e_t_focus_vcm(dev_vcm, ctrl->val);
++
++	return -EINVAL;
++}
++
++static const struct v4l2_ctrl_ops cn3927e_vcm_ctrl_ops = {
++	.s_ctrl = cn3927e_set_ctrl,
++};
++
++static int cn3927e_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
++{
++	return pm_runtime_resume_and_get(sd->dev);
++}
++
++static int cn3927e_close(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
++{
++	pm_runtime_put(sd->dev);
++
++	return 0;
++}
++
++static const struct v4l2_subdev_internal_ops cn3927e_int_ops = {
++	.open = cn3927e_open,
++	.close = cn3927e_close,
++};
++
++static const struct v4l2_subdev_core_ops cn3927e_core_ops = {
++	.log_status = v4l2_ctrl_subdev_log_status,
++	.subscribe_event = v4l2_ctrl_subdev_subscribe_event,
++	.unsubscribe_event = v4l2_event_subdev_unsubscribe,
++};
++
++static const struct v4l2_subdev_ops cn3927e_ops = {
++	.core = &cn3927e_core_ops,
++};
++
++static void cn3927e_subdev_cleanup(struct cn3927e_device *cn3927e_dev)
++{
++	v4l2_async_unregister_subdev(&cn3927e_dev->sd);
++	v4l2_ctrl_handler_free(&cn3927e_dev->ctrls_vcm);
++	media_entity_cleanup(&cn3927e_dev->sd.entity);
++}
++
++static int cn3927e_init_controls(struct cn3927e_device *dev_vcm)
++{
++	struct v4l2_ctrl_handler *hdl = &dev_vcm->ctrls_vcm;
++	const struct v4l2_ctrl_ops *ops = &cn3927e_vcm_ctrl_ops;
++
++	v4l2_ctrl_handler_init(hdl, 1);
++
++	v4l2_ctrl_new_std(hdl, ops, V4L2_CID_FOCUS_ABSOLUTE,
++			  0, CN3927E_MAX_FOCUS_POS, CN3927E_FOCUS_STEPS, 0);
++
++	if (hdl->error)
++		dev_err(dev_vcm->sd.dev, "%s fail error: 0x%x\n",
++			__func__, hdl->error);
++	dev_vcm->sd.ctrl_handler = hdl;
++	return hdl->error;
++}
++
++static int cn3927e_probe(struct i2c_client *client)
++{
++	struct cn3927e_device *cn3927e_dev;
++	int rval;
++
++	cn3927e_dev = devm_kzalloc(&client->dev, sizeof(*cn3927e_dev),
++				  GFP_KERNEL);
++	if (cn3927e_dev == NULL)
++		return -ENOMEM;
++
++	cn3927e_dev->vcc = devm_regulator_get(&client->dev, "vcc");
++	if (IS_ERR(cn3927e_dev->vcc))
++		return PTR_ERR(cn3927e_dev->vcc);
++
++	rval = regulator_enable(cn3927e_dev->vcc);
++	if (rval < 0) {
++		dev_err(&client->dev, "failed to enable vcc: %d\n", rval);
++		return rval;
++	}
++
++	usleep_range(1000, 2000);
++
++	v4l2_i2c_subdev_init(&cn3927e_dev->sd, client, &cn3927e_ops);
++	cn3927e_dev->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE |
++				V4L2_SUBDEV_FL_HAS_EVENTS;
++	cn3927e_dev->sd.internal_ops = &cn3927e_int_ops;
++
++	rval = cn3927e_init_controls(cn3927e_dev);
++	if (rval)
++		goto err_cleanup;
++
++	rval = media_entity_pads_init(&cn3927e_dev->sd.entity, 0, NULL);
++	if (rval < 0)
++		goto err_cleanup;
++
++	cn3927e_dev->sd.entity.function = MEDIA_ENT_F_LENS;
++
++	rval = v4l2_async_register_subdev(&cn3927e_dev->sd);
++	if (rval < 0)
++		goto err_cleanup;
++
++	pm_runtime_set_active(&client->dev);
++	pm_runtime_enable(&client->dev);
++	pm_runtime_idle(&client->dev);
++
++	return 0;
++
++err_cleanup:
++	regulator_disable(cn3927e_dev->vcc);
++	v4l2_ctrl_handler_free(&cn3927e_dev->ctrls_vcm);
++	media_entity_cleanup(&cn3927e_dev->sd.entity);
++
++	return rval;
++}
++
++static void cn3927e_remove(struct i2c_client *client)
++{
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct cn3927e_device *cn3927e_dev = sd_to_cn3927e_vcm(sd);
++	int ret;
++
++	pm_runtime_disable(&client->dev);
++	if (!pm_runtime_status_suspended(&client->dev)) {
++		ret = regulator_disable(cn3927e_dev->vcc);
++		if (ret) {
++			dev_err(&client->dev,
++				"Failed to disable vcc: %d\n", ret);
++		}
++	}
++	pm_runtime_set_suspended(&client->dev);
++	cn3927e_subdev_cleanup(cn3927e_dev);
++}
++
++/*
++ * This function sets the vcm position, so it consumes least current
++ * The lens position is gradually moved in units of CN3927E_CTRL_STEPS,
++ * to make the movements smoothly.
++ */
++static int __maybe_unused cn3927e_vcm_suspend(struct device *dev)
++{
++	struct i2c_client *client = to_i2c_client(dev);
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct cn3927e_device *cn3927e_dev = sd_to_cn3927e_vcm(sd);
++	int ret, val;
++
++	if (pm_runtime_suspended(&client->dev))
++		return 0;
++
++	for (val = cn3927e_dev->current_val & ~(CN3927E_CTRL_STEPS - 1);
++	     val >= 0; val -= CN3927E_CTRL_STEPS) {
++		ret = cn3927e_i2c_write(client,
++				       CN3927E_VAL(val, CN3927E_DEFAULT_S));
++		if (ret)
++			dev_err_once(dev, "%s I2C failure: %d", __func__, ret);
++		usleep_range(CN3927E_CTRL_DELAY_US, CN3927E_CTRL_DELAY_US + 10);
++	}
++
++	ret = regulator_disable(cn3927e_dev->vcc);
++	if (ret)
++		dev_err(dev, "Failed to disable vcc: %d\n", ret);
++
++	return ret;
++}
++
++/*
++ * This function sets the vcm position to the value set by the user
++ * through v4l2_ctrl_ops s_ctrl handler
++ * The lens position is gradually moved in units of CN3927E_CTRL_STEPS,
++ * to make the movements smoothly.
++ */
++static int  __maybe_unused cn3927e_vcm_resume(struct device *dev)
++{
++	struct i2c_client *client = to_i2c_client(dev);
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct cn3927e_device *cn3927e_dev = sd_to_cn3927e_vcm(sd);
++	int ret, val;
++
++	if (pm_runtime_suspended(&client->dev))
++		return 0;
++
++	ret = regulator_enable(cn3927e_dev->vcc);
++	if (ret) {
++		dev_err(dev, "Failed to enable vcc: %d\n", ret);
++		return ret;
++	}
++	usleep_range(1000, 2000);
++
++	for (val = cn3927e_dev->current_val % CN3927E_CTRL_STEPS;
++	     val < cn3927e_dev->current_val + CN3927E_CTRL_STEPS - 1;
++	     val += CN3927E_CTRL_STEPS) {
++		ret = cn3927e_i2c_write(client,
++				       CN3927E_VAL(val, CN3927E_DEFAULT_S));
++		if (ret)
++			dev_err_ratelimited(dev, "%s I2C failure: %d",
++						__func__, ret);
++		usleep_range(CN3927E_CTRL_DELAY_US, CN3927E_CTRL_DELAY_US + 10);
++	}
++
++	return 0;
++}
++
++static const struct i2c_device_id cn3927e_id_table[] = {
++	{ CN3927E_NAME, 0 },
++	{ { 0 } }
++};
++MODULE_DEVICE_TABLE(i2c, cn3927e_id_table);
++
++static const struct of_device_id cn3927e_of_table[] = {
++	{ .compatible = "chipnext,cn3927e" },
++	{ { 0 } }
++};
++MODULE_DEVICE_TABLE(of, cn3927e_of_table);
++
++static const struct dev_pm_ops cn3927e_pm_ops = {
++	SET_SYSTEM_SLEEP_PM_OPS(cn3927e_vcm_suspend, cn3927e_vcm_resume)
++	SET_RUNTIME_PM_OPS(cn3927e_vcm_suspend, cn3927e_vcm_resume, NULL)
++};
++
++static struct i2c_driver cn3927e_i2c_driver = {
++	.driver = {
++		.name = CN3927E_NAME,
++		.pm = &cn3927e_pm_ops,
++		.of_match_table = cn3927e_of_table,
++	},
++	.probe = cn3927e_probe,
++	.remove = cn3927e_remove,
++	.id_table = cn3927e_id_table,
++};
++
++module_i2c_driver(cn3927e_i2c_driver);
++
++MODULE_AUTHOR("NewWheat <newwheatzjz@outlook.com>");
++MODULE_DESCRIPTION("cn3927e VCM driver");
++MODULE_LICENSE("GPL v2");
+diff -Naur linux/drivers/media/i2c/gc5025.c orig-linux-sdm845-6.16-dev/drivers/media/i2c/gc5025.c
+--- linux/drivers/media/i2c/gc5025.c	1970-01-01 08:00:00.000000000 +0800
++++ orig-linux-sdm845-6.16-dev/drivers/media/i2c/gc5025.c	2025-03-15 16:34:58.681610600 +0800
+@@ -0,0 +1,1560 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * gc5025 driver
++ *
++ * Copyright (C) 2017 Fuzhou Rockchip Electronics Co., Ltd.
++ *
++ * V0.0X01.0X01 add poweron function.
++ * V0.0X01.0X02 fix mclk issue when probe multiple camera.
++ * V0.0X01.0X03 add enum_frame_interval function.
++ * V0.0X01.0X04 add quick stream on/off
++ */
++
++#include <linux/clk.h>
++#include <linux/device.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/pm_runtime.h>
++#include <linux/regulator/consumer.h>
++#include <linux/sysfs.h>
++#include <linux/version.h>
++#include <media/media-entity.h>
++#include <media/v4l2-async.h>
++#include <media/v4l2-ctrls.h>
++#include <media/v4l2-fwnode.h>
++#include <media/v4l2-subdev.h>
++#include <linux/pinctrl/consumer.h>
++#include <linux/slab.h>
++
++#define DRIVER_VERSION			KERNEL_VERSION(0, 0x01, 0x04)
++
++#ifndef V4L2_CID_DIGITAL_GAIN
++#define V4L2_CID_DIGITAL_GAIN		V4L2_CID_GAIN
++#endif
++
++#define GC5025_LANES			2
++#define GC5025_BITS_PER_SAMPLE		10
++#define GC5025_LINK_FREQ_MHZ		432000000
++/* pixel rate = link frequency * 2 * lanes / BITS_PER_SAMPLE */
++#define GC5025_PIXEL_RATE		(GC5025_LINK_FREQ_MHZ * 2 * 2 / 10)
++#define GC5025_XVCLK_FREQ		24000000
++
++#define CHIP_ID				0x5025
++#define GC5025_REG_CHIP_ID_H		0xf0
++#define GC5025_REG_CHIP_ID_L		0xf1
++
++#define GC5025_REG_SET_PAGE		0xfe
++#define GC5025_SET_PAGE_ONE		0x00
++
++#define GC5025_REG_CTRL_MODE		0x3f
++#define GC5025_MODE_SW_STANDBY		0x01
++#define GC5025_MODE_STREAMING		0x91
++
++#define GC5025_REG_EXPOSURE_H		0x03
++#define GC5025_REG_EXPOSURE_L		0x04
++#define	GC5025_EXPOSURE_MIN		4
++#define	GC5025_EXPOSURE_STEP		1
++#define GC5025_VTS_MAX			0x1fff
++
++#define GC5025_REG_AGAIN		0xb6
++#define GC5025_REG_DGAIN_INT		0xb1
++#define GC5025_REG_DGAIN_FRAC		0xb2
++#define GC5025_GAIN_MIN			64
++#define GC5025_GAIN_MAX			1024
++#define GC5025_GAIN_STEP		1
++#define GC5025_GAIN_DEFAULT		64
++
++#define GC5025_REG_VTS_H		0x07
++#define GC5025_REG_VTS_L		0x08
++
++#define REG_NULL			0xFF
++
++// #define OF_CAMERA_PINCTRL_STATE_DEFAULT	"rockchip,camera_default"
++// #define OF_CAMERA_PINCTRL_STATE_SLEEP	"rockchip,camera_sleep"
++
++#define GC5025_NAME			"gc5025"
++
++static const char * const gc5025_supply_names[] = {
++	"dovdd",	/* Digital I/O power */
++	"dvdd",		/* Digital core power */
++	"avdd",		/* Analog power */
++};
++
++#define GC5025_NUM_SUPPLIES ARRAY_SIZE(gc5025_supply_names)
++
++struct regval {
++	u8 addr;
++	u8 val;
++};
++
++struct gc5025_mode {
++	u32 width;
++	u32 height;
++	struct v4l2_fract max_fps;
++	u32 hts_def;
++	u32 vts_def;
++	u32 exp_def;
++	const struct regval *reg_list;
++};
++
++struct gc5025 {
++	struct i2c_client	*client;
++	struct clk		*xvclk;
++	struct gpio_desc	*reset_gpio;
++	// struct gpio_desc	*pwdn_gpio;
++	// struct gpio_desc	*power_gpio;
++	struct regulator_bulk_data supplies[GC5025_NUM_SUPPLIES];
++
++	struct pinctrl		*pinctrl;
++	struct pinctrl_state	*pins_default;
++	struct pinctrl_state	*pins_sleep;
++
++	struct v4l2_subdev	subdev;
++	struct media_pad	pad;
++	struct v4l2_ctrl_handler ctrl_handler;
++	struct v4l2_ctrl	*exposure;
++	struct v4l2_ctrl	*anal_gain;
++	struct v4l2_ctrl	*digi_gain;
++	struct v4l2_ctrl	*hblank;
++	struct v4l2_ctrl	*vblank;
++	struct mutex		mutex;
++	bool			streaming;
++	bool			power_on;
++	const struct gc5025_mode *cur_mode;
++	// u32			module_index;
++	// const char		*module_facing;
++	// const char		*module_name;
++	// const char		*len_name;
++	u32 Dgain_ratio;
++	bool DR_State;
++};
++
++#define to_gc5025(sd) container_of(sd, struct gc5025, subdev)
++
++/*
++ * Xclk 24Mhz
++ */
++static const struct regval gc5025_2592x1944_regs[] = {
++	{REG_NULL, 0x00},
++};
++
++/*
++ * Xclk 24Mhz
++ * max_framerate 30fps
++ * mipi_datarate per lane 656Mbps
++ */
++// static const struct regval gc5025_global_regs[] = {
++// 	{0xfe, 0x00},
++// 	{0xfe, 0x00},
++// 	{0xfe, 0x00},
++// 	{0xf7, 0x01},
++// 	{0xf8, 0x11},
++// 	{0xf9, 0x00},
++// 	{0xfa, 0xa0},
++// 	{0xfc, 0x2a},
++// 	{0xfe, 0x03},
++// 	{0x01, 0x07},
++// 	{0xfc, 0x2e},
++// 	{0xfe, 0x00},
++// 	{0x88, 0x03},
++// 	{0x03, 0x07},
++// 	{0x04, 0xC0},
++// 	{0x05, 0x02},
++// 	{0x06, 0x58},
++// 	{0x08, 0x20},
++// 	{0x0a, 0x1c},
++// 	{0x0c, 0x04},
++// 	{0x0d, 0x07},
++// 	{0x0e, 0x9c},
++// 	{0x0f, 0x0a},
++// 	{0x10, 0x30},
++// 	{0x17, 0xc0},
++// 	{0x18, 0x02},
++// 	{0x19, 0x17},
++// 	{0x1a, 0x1a},
++// 	{0x1e, 0x90},
++// 	{0x1f, 0xb0},
++// 	{0x20, 0x2b},
++// 	{0x21, 0x2b},
++// 	{0x26, 0x2b},
++// 	{0x25, 0xc1},
++// 	{0x27, 0x64},
++// 	{0x28, 0x00},
++// 	{0x29, 0x3f},
++// 	{0x2b, 0x80},
++// 	{0x30, 0x11},
++// 	{0x31, 0x20},
++// 	{0x32, 0xa0},
++// 	{0x33, 0x00},
++// 	{0x34, 0x55},
++// 	{0x3a, 0x00},
++// 	{0x3b, 0x00},
++// 	{0x81, 0x60},
++// 	{0xcb, 0x02},
++// 	{0xcd, 0x2d},
++// 	{0xcf, 0x50},
++// 	{0xd0, 0xb3},
++// 	{0xd1, 0x18},
++// 	{0xd9, 0xaa},
++// 	{0xdc, 0x03},
++// 	{0xdd, 0xaa},
++// 	{0xe0, 0x00},
++// 	{0xe1, 0x0a},
++// 	{0xe3, 0x2a},
++// 	{0xe4, 0xa0},
++// 	{0xe5, 0x06},
++// 	{0xe6, 0x10},
++// 	{0xe7, 0xc2},
++// 	{0xfe, 0x10},
++// 	{0xfe, 0x00},
++// 	{0xfe, 0x10},
++// 	{0xfe, 0x00},
++// 	{0x80, 0x10},
++// 	{0x89, 0x03},
++// 	{0xfe, 0x01},
++// 	{0x88, 0xf7},
++// 	{0x8a, 0x03},
++// 	{0x8e, 0xc7},
++// 	{0xfe, 0x00},
++// 	{0x40, 0x22},
++// 	{0x41, 0x28},
++// 	{0x42, 0x04},
++// 	{0x4e, 0x0f},
++// 	{0x4f, 0xf0},
++// 	{0x67, 0x0c},
++// 	{0xae, 0x40},
++// 	{0xaf, 0x04},
++// 	{0x60, 0x00},
++// 	{0x61, 0x80},
++// 	{0xb0, 0x58},
++// 	{0xb1, 0x01},
++// 	{0xb2, 0x00},
++// 	{0xb6, 0x00},
++// 	{0x91, 0x00},
++// 	{0x92, 0x02},
++// 	{0x94, 0x03},
++// 	{0xfe, 0x03},
++// 	{0x02, 0x03},
++// 	{0x03, 0x8e},
++// 	{0x06, 0x80},
++// 	{0x15, 0x00},
++// 	{0x16, 0x09},
++// 	{0x18, 0x0a},
++// 	{0x21, 0x10},
++// 	{0x22, 0x05},
++// 	{0x23, 0x20},
++// 	{0x24, 0x02},
++// 	{0x25, 0x20},
++// 	{0x26, 0x08},
++// 	{0x29, 0x06},
++// 	{0x2a, 0x0a},
++// 	{0x2b, 0x08},
++// 	{0xfe, 0x00},
++// 	{REG_NULL, 0x00},
++// };
++
++// static const struct regval gc5025_global_regs[] = {
++
++// 	/*SYS*/
++// 	{0xfe, 0x00},
++// 	{0xfe, 0x00},
++// 	{0xfe, 0x00},
++// 	{0xf7, 0x01},
++// 	{0xf8, 0x10},
++// 	// {REG_DLY, 0x02},
++// 	{0xf9, 0x00},
++// 	{0xfa, 0xa0},
++// 	{0xfc, 0x2a},
++// 	// {REG_DLY, 0x02},
++// 	{0xfe, 0x03},
++// 	{0x01, 0x07},
++// 	{0xfc, 0x2e},
++// 	{0xfe, 0x00},
++// 	{0x88, 0x03},
++// 	{0x3f, 0x00},
++
++// 	{0x03, 0x05},
++// 	{0x04, 0x08},
++// 	{0x05, 0x02},
++// 	{0x06, 0x52},
++// 	{0x08, 0x05},
++// 	{0x0a, 0x1c},
++// 	{0x0c, 0x04},
++// 	{0x09, 0x00},/*row start*/
++// 	{0x0a, 0x1c},/*row start*/
++// 	{0x0b, 0x00},/*col start*/
++// 	{0x0c, 0x04},/*col start*/
++
++// 	{0x0d, 0x07},
++// 	{0x0e, 0x9c},
++// 	{0x0f, 0x0a},
++// 	{0x10, 0x30},
++// 	{0x17, 0xc0},
++// 	{0x18, 0x02},
++// 	{0x19, 0x17},
++// 	{0x1a, 0x1a},
++// 	{0x1e, 0x90},
++// 	{0x1f, 0xb0},
++// 	{0x20, 0x2b},
++// 	{0x21, 0x2b},
++// 	{0x26, 0x2b},
++// 	{0x25, 0xc1},
++// 	{0x27, 0x64},
++// 	{0x28, 0x00},
++// 	{0x29, 0x3f},
++// 	{0x2b, 0x80},
++// 	{0x30, 0x11},
++// 	{0x31, 0x20},
++// 	{0x32, 0xa0},
++// 	{0x33, 0x00},
++// 	{0x34, 0x55},
++// 	{0x3a, 0x00},
++// 	{0x3b, 0x00},
++// 	{0x81, 0x60},
++// 	{0xcb, 0x02},
++// 	{0xcd, 0x2d},
++// 	{0xcf, 0x50},
++// 	{0xd0, 0xb3},
++// 	{0xd1, 0x18},
++// 	{0xd9, 0xaa},
++// 	{0xdc, 0x03},
++// 	{0xdd, 0xaa},
++// 	{0xe0, 0x00},
++// 	{0xe1, 0x0a},
++// 	{0xe3, 0x2a},
++// 	{0xe4, 0xa0},
++// 	{0xe5, 0x06},
++// 	{0xe6, 0x10},
++// 	{0xe7, 0xc2},
++// 	{0xfe, 0x10},
++// 	{0xfe, 0x00},
++// 	{0xfe, 0x10},
++// 	{0xfe, 0x00},
++// 	{0x1c, 0x1c},
++// 	{0x2f, 0x4a},
++// 	{0x38, 0x02},
++// 	{0x39, 0x00},
++// 	{0x3c, 0x02},
++// 	{0x3d, 0x02},
++// 	{0xd3, 0xcc},
++// 	{0x43, 0x03},
++// 	{0x1d, 0x13},
++
++// 	{0x80, 0x10},
++// 	{0x89, 0x03},
++// 	{0xfe, 0x01},
++// 	{0x88, 0xf7},
++// 	{0x8a, 0x03},
++// 	{0x8e, 0xc7},
++
++// 	{0xfe, 0x00},
++// 	{0x40, 0x22},
++// 	{0x41, 0x28},
++// 	{0x42, 0x04},
++// 	{0x4e, 0x0f},
++// 	{0x4f, 0xf0},
++// 	{0x67, 0x0c},
++// 	{0xae, 0x40},
++// 	{0xaf, 0x04},
++// 	{0x60, 0x00},
++// 	{0x61, 0x80},
++
++// 	{0xb0, 0x58},
++// 	{0xb1, 0x01},
++// 	{0xb2, 0x00},
++// 	{0xb6, 0x00},
++
++// 	{0x91, 0x00},
++// 	{0x92, 0x01},
++// 	{0x94, 0x02},
++
++// 	{0xfe, 0x03},
++// 	{0x02, 0x03},
++// 	{0x03, 0x8e},
++// 	{0x06, 0x80},
++// 	{0x15, 0x01},
++// 	{0x16, 0x09},
++// 	{0x18, 0x0a},
++// 	{0x21, 0x10},
++// 	{0x22, 0x05},
++// 	{0x23, 0x20},
++// 	{0x24, 0x02},
++// 	{0x25, 0x20},
++// 	{0x26, 0x08},
++// 	{0x29, 0x06},
++// 	{0x2a, 0x0a},
++// 	{0x2b, 0x08},
++// 	{0xfe, 0x00},
++// 	{0x3f, 0x91},
++// 	{REG_NULL, 0x00},
++// };
++
++static const struct regval gc5025_global_regs[] = {
++	/* SYS */
++	{0xfe, 0x00},
++	{0xfe, 0x00},
++	{0xfe, 0x00},
++	{0xf7, 0x01},
++	{0xf8, 0x11},
++	{0xf9, 0x00},
++	{0xfa, 0xa0},
++	{0xfc, 0x2a},
++	{0xfe, 0x03},
++	{0x01, 0x07},
++	{0xfc, 0x2e},
++	{0xfe, 0x00},
++	{0x88, 0x03},
++
++    /* Cisctl & Analog */
++	{0x03, 0x07},
++	{0x04, 0x08},
++	{0x05, 0x02},
++	{0x06, 0x58},
++	{0x08, 0x20},
++	{0x0a, 0x1c},
++	{0x0c, 0x04},
++	{0x0d, 0x07},
++	{0x0e, 0x9c},
++	{0x0f, 0x0a},
++	{0x10, 0x30},
++	{0x17, 0xc0}, //GC5025_MIRROR
++	{0x18, 0x02},
++	{0x19, 0x17},
++	{0x1a, 0x1a},
++	{0x1e, 0x90},
++	{0x1f, 0xb0},
++	{0x20, 0x2b},
++	{0x21, 0x2b},
++	{0x26, 0x2b},
++	{0x25, 0xc1},
++	{0x27, 0x64},
++	{0x28, 0x00},
++	{0x29, 0x3f},
++	{0x2b, 0x80},
++	{0x30, 0x11},
++	{0x31, 0x20},
++	{0x32, 0xa0},
++	{0x33, 0x00},
++	{0x34, 0x55},
++	{0x3a, 0x00},
++	{0x3b, 0x00},
++	{0x81, 0x60},
++	{0xcb, 0x02},
++	{0xcd, 0x2d},
++	{0xcf, 0x50},
++	{0xd0, 0xb3},
++	{0xd1, 0x18},
++	{0xd9, 0xaa},
++	{0xdc, 0x03},
++	{0xdd, 0xaa},
++	{0xe0, 0x00},
++	{0xe1, 0x0a},
++	{0xe3, 0x2a},
++	{0xe4, 0xa0},
++	{0xe5, 0x06},
++	{0xe6, 0x10},
++	{0xe7, 0xc2},
++	{0xfe, 0x10},
++	{0xfe, 0x00},
++	{0xfe, 0x10},
++	{0xfe, 0x00},
++
++	/* doublereset regs */
++	{0x1c, 0x1c},
++	{0x2f, 0x4a},
++	{0x38, 0x02},
++	{0x39, 0x00},
++	{0x3c, 0x02},
++	{0x3d, 0x02},
++	{0xd3, 0xcc},
++	{0x43, 0x03},
++	{0x1d, 0x13},
++	// /* no doublereset regs*/
++	// {0x1c, 0x2c},
++	// {0x2f, 0x4d},
++	// {0x38, 0x04},
++	// {0x39, 0x02},
++	// {0x3c, 0x08},
++	// {0x3d, 0x0f},
++	// {0xd3, 0xc4},
++	// {0x43, 0x08},
++	// {0x1d, 0x00},
++
++	/* ISP */
++	{0x80, 0x10},
++	{0x89, 0x03},
++	{0xfe, 0x01},
++	{0x88, 0xf7},
++	{0x8a, 0x03},
++	{0x8e, 0xc7},
++
++	/* BLK */
++	{0xfe, 0x00},
++	{0x40, 0x22},
++	{0x41, 0x28},
++	{0x42, 0x04},
++	{0x4e, 0x0f},
++	{0x4f, 0xf0},
++	{0x67, 0x0c},
++	{0xae, 0x40},
++	{0xaf, 0x04},
++	{0x60, 0x00},
++	{0x61, 0x80},
++
++	/* gain */
++	{0xb0, 0x58},
++	{0xb1, 0x01},
++	{0xb2, 0x00},
++	{0xb6, 0x00},
++
++	/* Crop window */
++	{0x91, 0x00},
++	{0x92, 0x02}, //GC5025_STARTX
++	{0x94, 0x03}, //GC5025_STARTY
++
++	/* MIPI */
++	{0xfe, 0x03},
++	{0x02, 0x03},
++	{0x03, 0x8e},
++	{0x06, 0x80},
++	{0x15, 0x00},
++	{0x16, 0x09},
++	{0x18, 0x0a},
++	{0x21, 0x10},
++	{0x22, 0x05},
++	{0x23, 0x20},
++	{0x24, 0x02},
++	{0x25, 0x20},
++	{0x26, 0x08},
++	{0x29, 0x06},
++	{0x2a, 0x0a},
++	{0x2b, 0x08},
++	{0xfe, 0x00},
++	{0x3f, 0x91},
++	{REG_NULL, 0x00},
++};
++
++static const struct regval gc5025_doublereset_reg[] = {
++	{0xfe, 0x00},
++	{0x1c, 0x1c},
++	{0x2f, 0x4a},
++	{0x38, 0x02},
++	{0x39, 0x00},
++	{0x3c, 0x02},
++	{0x3d, 0x02},
++	{0xd3, 0xcc},
++	{0x43, 0x03},
++	{0x1d, 0x13},
++	{REG_NULL, 0x00},
++};
++
++static const struct regval gc5025_disable_doublereset_reg[] = {
++	{0xfe, 0x00},
++	{0x1c, 0x2c},
++	{0x2f, 0x4d},
++	{0x38, 0x04},
++	{0x39, 0x02},
++	{0x3c, 0x08},
++	{0x3d, 0x0f},
++	{0xd3, 0xc4},
++	{0x43, 0x08},
++	{0x1d, 0x00},
++	{REG_NULL, 0x00},
++};
++
++static const struct gc5025_mode supported_modes[] = {
++	{
++		.width = 2592,
++		.height = 1944,
++		.max_fps = {
++			.numerator = 1, // 10000
++			.denominator = 30, // 300000
++		},
++		.exp_def = 0x07C0,
++		.hts_def = 0x12C0,
++		.vts_def = 0x07D0,
++		.reg_list = gc5025_2592x1944_regs,
++	},
++};
++
++static const s64 link_freq_menu_items[] = {
++	GC5025_LINK_FREQ_MHZ
++};
++
++/* Write registers up to 4 at a time */
++static int gc5025_write_reg(struct i2c_client *client, u8 reg, u8 val)
++{
++	struct i2c_msg msg;
++	u8 buf[2];
++	int ret;
++
++	buf[0] = reg & 0xFF;
++	buf[1] = val;
++
++	msg.addr = client->addr;
++	msg.flags = client->flags;
++	msg.buf = buf;
++	msg.len = sizeof(buf);
++
++	ret = i2c_transfer(client->adapter, &msg, 1);
++	if (ret >= 0)
++		return 0;
++
++	dev_err(&client->dev,
++		"gc5025 write reg(0x%x val:0x%x) failed !\n", reg, val);
++
++	return ret;
++}
++
++static int gc5025_write_array(struct i2c_client *client,
++				const struct regval *regs)
++{
++	u32 i = 0;
++	int ret = 0;
++
++	for (i = 0; ret == 0 && regs[i].addr != REG_NULL; i++)
++		ret = gc5025_write_reg(client, regs[i].addr, regs[i].val);
++
++	return ret;
++}
++
++/* Read registers up to 4 at a time */
++static int gc5025_read_reg(struct i2c_client *client, u8 reg, u8 *val)
++{
++	struct i2c_msg msg[2];
++	u8 buf[1];
++	int ret;
++
++	buf[0] = reg & 0xFF;
++
++	msg[0].addr = client->addr;
++	msg[0].flags = client->flags;
++	msg[0].buf = buf;
++	msg[0].len = sizeof(buf);
++
++	msg[1].addr = client->addr;
++	msg[1].flags = client->flags | I2C_M_RD;
++	msg[1].buf = buf;
++	msg[1].len = 1;
++
++	ret = i2c_transfer(client->adapter, msg, 2);
++	if (ret >= 0) {
++		*val = buf[0];
++		return 0;
++	}
++
++	dev_err(&client->dev,
++		"gc5025 read reg:0x%x failed !\n", reg);
++
++	return ret;
++}
++
++static int gc5025_get_reso_dist(const struct gc5025_mode *mode,
++	struct v4l2_mbus_framefmt *framefmt)
++{
++	return abs(mode->width - framefmt->width) +
++		abs(mode->height - framefmt->height);
++}
++
++static const struct gc5025_mode *
++gc5025_find_best_fit(struct v4l2_subdev_format *fmt)
++{
++	struct v4l2_mbus_framefmt *framefmt = &fmt->format;
++	int dist;
++	int cur_best_fit = 0;
++	int cur_best_fit_dist = -1;
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(supported_modes); i++) {
++		dist = gc5025_get_reso_dist(&supported_modes[i], framefmt);
++		if (cur_best_fit_dist == -1 || dist < cur_best_fit_dist) {
++			cur_best_fit_dist = dist;
++			cur_best_fit = i;
++		}
++	}
++
++	return &supported_modes[cur_best_fit];
++}
++
++static int gc5025_set_fmt(struct v4l2_subdev *sd,
++	struct v4l2_subdev_state *sd_state,
++	struct v4l2_subdev_format *fmt)
++{
++	struct gc5025 *gc5025 = to_gc5025(sd);
++	const struct gc5025_mode *mode;
++	s64 h_blank, vblank_def;
++
++	mutex_lock(&gc5025->mutex);
++
++	mode = gc5025_find_best_fit(fmt);
++	fmt->format.code = MEDIA_BUS_FMT_SRGGB10_1X10;
++	fmt->format.width = mode->width;
++	fmt->format.height = mode->height;
++	fmt->format.field = V4L2_FIELD_NONE;
++	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
++#ifdef CONFIG_VIDEO_V4L2_SUBDEV_API
++		*v4l2_subdev_state_get_format(sd_state, fmt->pad) = fmt->format;
++#else
++		mutex_unlock(&gc5025->mutex);
++		return -ENOTTY;
++#endif
++	} else {
++		gc5025->cur_mode = mode;
++		h_blank = mode->hts_def - mode->width;
++		__v4l2_ctrl_modify_range(gc5025->hblank, h_blank,
++			h_blank, 1, h_blank);
++		vblank_def = mode->vts_def - mode->height;
++		__v4l2_ctrl_modify_range(gc5025->vblank, vblank_def,
++			GC5025_VTS_MAX - mode->height,
++			1, vblank_def);
++	}
++
++	mutex_unlock(&gc5025->mutex);
++
++	return 0;
++}
++
++static int gc5025_get_fmt(struct v4l2_subdev *sd,
++	struct v4l2_subdev_state *sd_state,
++	struct v4l2_subdev_format *fmt)
++{
++	struct gc5025 *gc5025 = to_gc5025(sd);
++	const struct gc5025_mode *mode = gc5025->cur_mode;
++
++	mutex_lock(&gc5025->mutex);
++	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
++#ifdef CONFIG_VIDEO_V4L2_SUBDEV_API
++		fmt->format = *v4l2_subdev_state_get_format(sd_state, fmt->pad);
++#else
++		mutex_unlock(&gc5025->mutex);
++		return -ENOTTY;
++#endif
++	} else {
++		fmt->format.width = mode->width;
++		fmt->format.height = mode->height;
++		fmt->format.code = MEDIA_BUS_FMT_SRGGB10_1X10;
++		fmt->format.field = V4L2_FIELD_NONE;
++	}
++	mutex_unlock(&gc5025->mutex);
++
++	return 0;
++}
++
++static int gc5025_enum_mbus_code(struct v4l2_subdev *sd,
++	struct v4l2_subdev_state *sd_state,
++	struct v4l2_subdev_mbus_code_enum *code)
++{
++	if (code->index != 0)
++		return -EINVAL;
++	code->code = MEDIA_BUS_FMT_SRGGB10_1X10;
++
++	return 0;
++}
++
++static int gc5025_enum_frame_sizes(struct v4l2_subdev *sd,
++				    struct v4l2_subdev_state *sd_state,
++				   struct v4l2_subdev_frame_size_enum *fse)
++{
++	if (fse->index >= ARRAY_SIZE(supported_modes))
++		return -EINVAL;
++
++	if (fse->code != MEDIA_BUS_FMT_SRGGB10_1X10)
++		return -EINVAL;
++
++	fse->min_width  = supported_modes[fse->index].width;
++	fse->max_width  = supported_modes[fse->index].width;
++	fse->max_height = supported_modes[fse->index].height;
++	fse->min_height = supported_modes[fse->index].height;
++
++	return 0;
++}
++
++static int gc5025_g_frame_interval(struct v4l2_subdev *sd,
++	struct v4l2_subdev_state *sd_state,
++	struct v4l2_subdev_frame_interval *fi)
++{
++	struct gc5025 *gc5025 = to_gc5025(sd);
++	const struct gc5025_mode *mode = gc5025->cur_mode;
++
++	if (fi->which != V4L2_SUBDEV_FORMAT_ACTIVE)
++		return -EINVAL;
++
++	fi->interval = mode->max_fps;
++
++	return 0;
++}
++
++static int __gc5025_start_stream(struct gc5025 *gc5025)
++{
++	int ret;
++
++	ret = gc5025_write_array(gc5025->client, gc5025->cur_mode->reg_list);
++	if (ret)
++		return ret;
++
++	// if (gc5025->DR_State) {
++	// 	ret = gc5025_write_array(gc5025->client,
++	// 		gc5025_doublereset_reg);
++	// } else {
++	// 	ret = gc5025_write_array(gc5025->client,
++	// 		gc5025_disable_doublereset_reg);
++	// }
++	// if (ret)
++	// 	return ret;
++	/* In case these controls are set before streaming */
++	mutex_unlock(&gc5025->mutex);
++	ret = v4l2_ctrl_handler_setup(&gc5025->ctrl_handler);
++	mutex_lock(&gc5025->mutex);
++	if (ret)
++		return ret;
++	ret = gc5025_write_reg(gc5025->client,
++		GC5025_REG_SET_PAGE,
++		GC5025_SET_PAGE_ONE);
++	ret |= gc5025_write_reg(gc5025->client,
++		GC5025_REG_CTRL_MODE,
++		GC5025_MODE_STREAMING);
++	return ret;
++}
++
++static int __gc5025_stop_stream(struct gc5025 *gc5025)
++{
++	int ret;
++
++	ret = gc5025_write_reg(gc5025->client,
++		GC5025_REG_SET_PAGE,
++		GC5025_SET_PAGE_ONE);
++	ret |= gc5025_write_reg(gc5025->client,
++		GC5025_REG_CTRL_MODE,
++		GC5025_MODE_SW_STANDBY);
++	return ret;
++}
++
++static int gc5025_s_stream(struct v4l2_subdev *sd, int on)
++{
++	struct gc5025 *gc5025 = to_gc5025(sd);
++	struct i2c_client *client = gc5025->client;
++	int ret = 0;
++
++	mutex_lock(&gc5025->mutex);
++	on = !!on;
++	if (on == gc5025->streaming)
++		goto unlock_and_return;
++
++	if (on) {
++		ret = pm_runtime_get_sync(&client->dev);
++		if (ret < 0) {
++			pm_runtime_put_noidle(&client->dev);
++			goto unlock_and_return;
++		}
++
++		ret = __gc5025_start_stream(gc5025);
++		if (ret) {
++			v4l2_err(sd, "start stream failed while write regs\n");
++			pm_runtime_put(&client->dev);
++			goto unlock_and_return;
++		}
++	} else {
++		__gc5025_stop_stream(gc5025);
++		pm_runtime_put(&client->dev);
++	}
++
++	gc5025->streaming = on;
++
++unlock_and_return:
++	mutex_unlock(&gc5025->mutex);
++
++	return ret;
++}
++
++static int gc5025_s_power(struct v4l2_subdev *sd, int on)
++{
++	struct gc5025 *gc5025 = to_gc5025(sd);
++	struct i2c_client *client = gc5025->client;
++	int ret = 0;
++
++	mutex_lock(&gc5025->mutex);
++
++	/* If the power state is not modified - no work to do. */
++	if (gc5025->power_on == !!on)
++		goto unlock_and_return;
++
++	if (on) {
++		ret = pm_runtime_get_sync(&client->dev);
++		if (ret < 0) {
++			pm_runtime_put_noidle(&client->dev);
++			goto unlock_and_return;
++		}
++
++		ret = gc5025_write_array(gc5025->client, gc5025_global_regs);
++		if (ret) {
++			v4l2_err(sd, "could not set init registers\n");
++			pm_runtime_put_noidle(&client->dev);
++			goto unlock_and_return;
++		}
++
++		gc5025->power_on = true;
++	} else {
++		pm_runtime_put(&client->dev);
++		gc5025->power_on = false;
++	}
++
++unlock_and_return:
++	mutex_unlock(&gc5025->mutex);
++
++	return ret;
++}
++
++/* Calculate the delay in us by clock rate and clock cycles */
++static inline u32 gc5025_cal_delay(u32 cycles)
++{
++	return DIV_ROUND_UP(cycles, GC5025_XVCLK_FREQ / 1000 / 1000);
++}
++
++static int __gc5025_power_on(struct gc5025 *gc5025)
++{
++	int ret;
++	u32 delay_us;
++	struct device *dev = &gc5025->client->dev;
++
++	// if (!IS_ERR(gc5025->power_gpio)) {
++	// 	gpiod_set_value_cansleep(gc5025->power_gpio, 1);
++	// 	usleep_range(5000, 5100);
++	// }
++
++	// if (!IS_ERR_OR_NULL(gc5025->pins_default)) {
++	// 	ret = pinctrl_select_state(gc5025->pinctrl,
++	// 				   gc5025->pins_default);
++	// 	if (ret < 0)
++	// 		dev_err(dev, "could not set pins\n");
++	// }
++	ret = regulator_bulk_enable(GC5025_NUM_SUPPLIES, gc5025->supplies);
++	if (ret < 0) {
++		dev_err(dev, "Failed to enable regulators\n");
++		return ret;
++	}
++
++	ret = clk_set_rate(gc5025->xvclk, GC5025_XVCLK_FREQ);
++	if (ret < 0)
++		dev_warn(dev, "Failed to set xvclk rate (24MHz)\n");
++	if (clk_get_rate(gc5025->xvclk) != GC5025_XVCLK_FREQ)
++		dev_warn(dev, "xvclk mismatched, modes are based on 24MHz\n");
++	ret = clk_prepare_enable(gc5025->xvclk);
++	if (ret < 0) {
++		dev_err(dev, "Failed to enable xvclk\n");
++		goto disable_regulator;
++	}
++
++	usleep_range(1000, 1100);
++	if (!IS_ERR(gc5025->reset_gpio))
++		gpiod_set_value_cansleep(gc5025->reset_gpio, 0);
++
++	usleep_range(1000, 1100);
++	if (!IS_ERR(gc5025->reset_gpio))
++		gpiod_set_value_cansleep(gc5025->reset_gpio, 1);	
++
++	usleep_range(1000, 1100);
++	if (!IS_ERR(gc5025->reset_gpio))
++		gpiod_set_value_cansleep(gc5025->reset_gpio, 0);
++
++	// usleep_range(500, 1000);
++	// if (!IS_ERR(gc5025->pwdn_gpio))
++	// 	gpiod_set_value_cansleep(gc5025->pwdn_gpio, 0);
++
++	/* 8192 cycles prior to first SCCB transaction */
++	delay_us = gc5025_cal_delay(8192);
++	usleep_range(delay_us, delay_us * 2);
++
++	return 0;
++
++disable_regulator:
++	regulator_bulk_disable(GC5025_NUM_SUPPLIES, gc5025->supplies);
++
++	return ret;
++}
++
++static void __gc5025_power_off(struct gc5025 *gc5025)
++{
++	// int ret;
++
++	// if (!IS_ERR(gc5025->pwdn_gpio))
++	// 	gpiod_set_value_cansleep(gc5025->pwdn_gpio, 1);
++	if (!IS_ERR(gc5025->reset_gpio))
++		gpiod_set_value_cansleep(gc5025->reset_gpio, 1);
++
++	clk_disable_unprepare(gc5025->xvclk);
++	// if (!IS_ERR_OR_NULL(gc5025->pins_sleep)) {
++	// 	ret = pinctrl_select_state(gc5025->pinctrl,
++	// 		gc5025->pins_sleep);
++	// 	if (ret < 0)
++	// 		dev_dbg(&gc5025->client->dev, "could not set pins\n");
++	// }
++	regulator_bulk_disable(GC5025_NUM_SUPPLIES, gc5025->supplies);
++}
++
++static int gc5025_runtime_resume(struct device *dev)
++{
++	struct i2c_client *client = to_i2c_client(dev);
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct gc5025 *gc5025 = to_gc5025(sd);
++
++	return __gc5025_power_on(gc5025);
++}
++
++static int gc5025_runtime_suspend(struct device *dev)
++{
++	struct i2c_client *client = to_i2c_client(dev);
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct gc5025 *gc5025 = to_gc5025(sd);
++
++	__gc5025_power_off(gc5025);
++
++	return 0;
++}
++
++#ifdef CONFIG_VIDEO_V4L2_SUBDEV_API
++static int gc5025_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
++{
++	struct gc5025 *gc5025 = to_gc5025(sd);
++	struct v4l2_mbus_framefmt *try_fmt =
++		v4l2_subdev_state_get_format(fh->state, 0);
++	const struct gc5025_mode *def_mode = &supported_modes[0];
++
++	mutex_lock(&gc5025->mutex);
++	/* Initialize try_fmt */
++	try_fmt->width = def_mode->width;
++	try_fmt->height = def_mode->height;
++	try_fmt->code = MEDIA_BUS_FMT_SRGGB10_1X10;
++	try_fmt->field = V4L2_FIELD_NONE;
++
++	mutex_unlock(&gc5025->mutex);
++	/* No crop or compose */
++
++	return 0;
++}
++#endif
++
++static int gc5025_enum_frame_interval(struct v4l2_subdev *sd,
++				       struct v4l2_subdev_state *sd_state,
++				       struct v4l2_subdev_frame_interval_enum *fie)
++{
++	if (fie->index >= ARRAY_SIZE(supported_modes))
++		return -EINVAL;
++
++	fie->code = MEDIA_BUS_FMT_SRGGB10_1X10;
++	fie->width = supported_modes[fie->index].width;
++	fie->height = supported_modes[fie->index].height;
++	fie->interval = supported_modes[fie->index].max_fps;
++	return 0;
++}
++
++static int gc5025_g_mbus_config(struct v4l2_subdev *sd, unsigned int pad_id,
++				 struct v4l2_mbus_config *config)
++{
++	config->type = V4L2_MBUS_CSI2_DPHY;
++	config->bus.mipi_csi2.num_data_lanes = GC5025_LANES;
++
++	return 0;
++}
++
++static int gc5025_get_selection(struct v4l2_subdev *sd,
++				struct v4l2_subdev_state *sd_state,
++				struct v4l2_subdev_selection *sel)
++{
++	struct gc5025 *gc5025 = to_gc5025(sd);
++
++	switch (sel->target) {
++	case V4L2_SEL_TGT_CROP:
++		switch (sel->which) {
++		case V4L2_SUBDEV_FORMAT_TRY:
++			v4l2_subdev_state_get_crop(sd_state, sel->pad);
++			break;
++		case V4L2_SUBDEV_FORMAT_ACTIVE:
++			sel->r.top = 0;
++			sel->r.left = 0;
++			sel->r.width = gc5025->cur_mode->width;
++			sel->r.height = gc5025->cur_mode->height;
++			break;
++		}
++		return 0;
++	case V4L2_SEL_TGT_CROP_DEFAULT:
++	case V4L2_SEL_TGT_CROP_BOUNDS:
++	case V4L2_SEL_TGT_NATIVE_SIZE:
++		sel->r.left = 0;
++		sel->r.width = 2592;
++		sel->r.top = 0;
++		sel->r.height = 1944;
++		return 0;
++	default:
++		return -EINVAL;
++	}
++}
++
++static const struct dev_pm_ops gc5025_pm_ops = {
++	SET_RUNTIME_PM_OPS(gc5025_runtime_suspend,
++			   gc5025_runtime_resume, NULL)
++};
++
++#ifdef CONFIG_VIDEO_V4L2_SUBDEV_API
++static const struct v4l2_subdev_internal_ops gc5025_internal_ops = {
++	.open = gc5025_open,
++};
++#endif
++
++static const struct v4l2_subdev_core_ops gc5025_core_ops = {
++	.s_power = gc5025_s_power,
++};
++
++static const struct v4l2_subdev_video_ops gc5025_video_ops = {
++	.s_stream = gc5025_s_stream,
++};
++
++static const struct v4l2_subdev_pad_ops gc5025_pad_ops = {
++	.enum_mbus_code = gc5025_enum_mbus_code,
++	.enum_frame_size = gc5025_enum_frame_sizes,
++	.enum_frame_interval = gc5025_enum_frame_interval,
++	.get_fmt = gc5025_get_fmt,
++	.set_fmt = gc5025_set_fmt,
++	.get_selection = gc5025_get_selection,
++	.get_mbus_config = gc5025_g_mbus_config,
++	.get_frame_interval = gc5025_g_frame_interval,
++};
++
++static const struct v4l2_subdev_ops gc5025_subdev_ops = {
++	.core	= &gc5025_core_ops,
++	.video	= &gc5025_video_ops,
++	.pad	= &gc5025_pad_ops,
++};
++
++static int gc5025_set_exposure_reg(struct gc5025 *gc5025, u32 exposure)
++{
++	u32 caltime = 0;
++	int ret = 0;
++
++	caltime = exposure / 2;
++	caltime = caltime * 2;
++	gc5025->Dgain_ratio = 256 * exposure / caltime;
++	ret = gc5025_write_reg(gc5025->client,
++		GC5025_REG_SET_PAGE,
++		GC5025_SET_PAGE_ONE);
++	if (!gc5025->DR_State) {
++		if (caltime <= 10)
++			ret |= gc5025_write_reg(gc5025->client, 0xd9, 0xdd);
++		else
++			ret |= gc5025_write_reg(gc5025->client, 0xd9, 0xaa);
++	}
++	ret |= gc5025_write_reg(gc5025->client,
++		GC5025_REG_EXPOSURE_H,
++		(caltime >> 8) & 0x3F);
++	ret |= gc5025_write_reg(gc5025->client,
++		GC5025_REG_EXPOSURE_L,
++		caltime & 0xFF);
++	return ret;
++}
++
++#define GC5025_ANALOG_GAIN_1 64    /*1.00x*/
++#define GC5025_ANALOG_GAIN_2 92   // 1.445x
++
++static int gc5025_set_gain_reg(struct gc5025 *gc5025, u32 a_gain)
++{
++	int ret = 0;
++	u32 temp = 0;
++
++	if (a_gain < 0x40)
++		a_gain = 0x40;
++	ret = gc5025_write_reg(gc5025->client,
++		GC5025_REG_SET_PAGE,
++		GC5025_SET_PAGE_ONE);
++	if (a_gain >= GC5025_ANALOG_GAIN_1 &&
++		a_gain < GC5025_ANALOG_GAIN_2) {
++		ret |= gc5025_write_reg(gc5025->client,
++			GC5025_REG_AGAIN, 0x0);
++		temp = a_gain;
++	} else {
++		ret |= gc5025_write_reg(gc5025->client,
++			GC5025_REG_AGAIN, 0x1);
++		temp = 64 * a_gain / GC5025_ANALOG_GAIN_2;
++	}
++	temp = temp * gc5025->Dgain_ratio / 256;
++	ret |= gc5025_write_reg(gc5025->client,
++		GC5025_REG_DGAIN_INT,
++		temp >> 6);
++	ret |= gc5025_write_reg(gc5025->client,
++		GC5025_REG_DGAIN_FRAC,
++		(temp << 2) & 0xfc);
++	return ret;
++}
++
++static int gc5025_set_ctrl(struct v4l2_ctrl *ctrl)
++{
++	struct gc5025 *gc5025 = container_of(ctrl->handler,
++					     struct gc5025, ctrl_handler);
++	struct i2c_client *client = gc5025->client;
++	s64 max;
++	int ret = 0;
++
++	/* Propagate change of current control to all related controls */
++	switch (ctrl->id) {
++	case V4L2_CID_VBLANK:
++		/* Update max exposure while meeting expected vblanking */
++		max = gc5025->cur_mode->height + ctrl->val - 4;
++		__v4l2_ctrl_modify_range(gc5025->exposure,
++			gc5025->exposure->minimum, max,
++			gc5025->exposure->step,
++			gc5025->exposure->default_value);
++		break;
++	}
++
++	if (!pm_runtime_get_if_in_use(&client->dev))
++		return 0;
++
++	switch (ctrl->id) {
++	case V4L2_CID_EXPOSURE:
++		/* 4 least significant bits of expsoure are fractional part */
++		ret = gc5025_set_exposure_reg(gc5025, ctrl->val);
++		break;
++	case V4L2_CID_ANALOGUE_GAIN:
++		ret = gc5025_set_gain_reg(gc5025, ctrl->val);
++		break;
++	case V4L2_CID_VBLANK:
++		ret = gc5025_write_reg(gc5025->client,
++			GC5025_REG_SET_PAGE,
++			GC5025_SET_PAGE_ONE);
++		ret |= gc5025_write_reg(gc5025->client,
++			GC5025_REG_VTS_H,
++			((ctrl->val - 24) >> 8) & 0xff);
++		ret |= gc5025_write_reg(gc5025->client,
++			GC5025_REG_VTS_L,
++			(ctrl->val - 24) & 0xff);
++		break;
++	default:
++		dev_warn(&client->dev, "%s Unhandled id:0x%x, val:0x%x\n",
++			__func__, ctrl->id, ctrl->val);
++		break;
++	}
++
++	pm_runtime_put(&client->dev);
++
++	return ret;
++}
++
++static const struct v4l2_ctrl_ops gc5025_ctrl_ops = {
++	.s_ctrl = gc5025_set_ctrl,
++};
++
++static int gc5025_initialize_controls(struct gc5025 *gc5025)
++{
++	const struct gc5025_mode *mode;
++	struct v4l2_ctrl_handler *handler;
++	struct v4l2_ctrl *ctrl;
++	struct i2c_client *client = v4l2_get_subdevdata(&gc5025->subdev);
++	struct v4l2_fwnode_device_properties props;
++	s64 exposure_max, vblank_def;
++	u32 h_blank;
++	int ret;
++
++	handler = &gc5025->ctrl_handler;
++	mode = gc5025->cur_mode;
++	ret = v4l2_ctrl_handler_init(handler, 8);
++	if (ret)
++		return ret;
++	handler->lock = &gc5025->mutex;
++
++	ctrl = v4l2_ctrl_new_int_menu(handler, NULL, V4L2_CID_LINK_FREQ,
++		0, 0, link_freq_menu_items);
++	if (ctrl)
++		ctrl->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	v4l2_ctrl_new_std(handler, NULL, V4L2_CID_PIXEL_RATE,
++		0, GC5025_PIXEL_RATE, 1, GC5025_PIXEL_RATE);
++
++	h_blank = mode->hts_def - mode->width;
++	gc5025->hblank = v4l2_ctrl_new_std(handler, NULL, V4L2_CID_HBLANK,
++		h_blank, h_blank, 1, h_blank);
++	if (gc5025->hblank)
++		gc5025->hblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	vblank_def = mode->vts_def - mode->height;
++	gc5025->vblank = v4l2_ctrl_new_std(handler, &gc5025_ctrl_ops,
++		V4L2_CID_VBLANK, vblank_def,
++		GC5025_VTS_MAX - mode->height,
++		1, vblank_def);
++
++	exposure_max = mode->vts_def - 4;
++	gc5025->exposure = v4l2_ctrl_new_std(handler, &gc5025_ctrl_ops,
++		V4L2_CID_EXPOSURE, GC5025_EXPOSURE_MIN,
++		exposure_max, GC5025_EXPOSURE_STEP,
++		mode->exp_def);
++
++	gc5025->anal_gain = v4l2_ctrl_new_std(handler, &gc5025_ctrl_ops,
++		V4L2_CID_ANALOGUE_GAIN, GC5025_GAIN_MIN,
++		GC5025_GAIN_MAX, GC5025_GAIN_STEP,
++		GC5025_GAIN_DEFAULT);
++
++	if (handler->error) {
++		ret = handler->error;
++		dev_err(&gc5025->client->dev,
++			"Failed to init controls(%d)\n", ret);
++		goto err_free_handler;
++	}
++
++	ret = v4l2_fwnode_device_parse(&client->dev, &props);
++	if (ret)
++		return ret;
++
++	ret = v4l2_ctrl_new_fwnode_properties(handler, &gc5025_ctrl_ops, &props);
++	if (ret)
++		return ret;
++
++	gc5025->subdev.ctrl_handler = handler;
++
++	return 0;
++
++err_free_handler:
++	v4l2_ctrl_handler_free(handler);
++
++	return ret;
++}
++
++static int gc5025_check_sensor_id(struct gc5025 *gc5025,
++	struct i2c_client *client)
++{
++	struct device *dev = &gc5025->client->dev;
++	u16 id = 0;
++	u8 reg_H = 0;
++	u8 reg_L = 0;
++	u8 flag_doublereset = 0;
++	u8 flag_GC5025A = 0;
++	int ret;
++
++	ret = gc5025_read_reg(client, GC5025_REG_CHIP_ID_H, &reg_H);
++	ret |= gc5025_read_reg(client, GC5025_REG_CHIP_ID_L, &reg_L);
++	id = ((reg_H << 8) & 0xff00) | (reg_L & 0xff);
++	if (id != CHIP_ID) {
++		dev_err(dev, "Unexpected sensor id(%06x), ret(%d)\n", id, ret);
++		return -ENODEV;
++	}
++
++	ret |= gc5025_read_reg(client, 0x26, &flag_doublereset);
++	ret |= gc5025_read_reg(client, 0x27, &flag_GC5025A);
++	if ((flag_GC5025A & 0x01) == 0x01) {
++		dev_warn(dev, "GC5025A sensor!\n");
++		gc5025->DR_State = false;
++	} else {
++		if ((flag_doublereset & 0x03) == 0x01) {
++			gc5025->DR_State = false;
++			dev_warn(dev, "GC5025 double reset off\n");
++		} else {
++			gc5025->DR_State = true;
++			dev_warn(dev, "GC5025 double reset on\n");
++		}
++	}
++	return ret;
++}
++
++static int gc5025_configure_regulators(struct gc5025 *gc5025)
++{
++	unsigned int i;
++
++	for (i = 0; i < GC5025_NUM_SUPPLIES; i++)
++		gc5025->supplies[i].supply = gc5025_supply_names[i];
++
++	return devm_regulator_bulk_get(&gc5025->client->dev,
++		GC5025_NUM_SUPPLIES,
++		gc5025->supplies);
++}
++
++static int gc5025_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	// struct device_node *node = dev->of_node;
++	struct gc5025 *gc5025;
++	struct v4l2_subdev *sd;
++	// char facing[2];
++	int ret;
++
++	dev_info(dev, "driver version: %02x.%02x.%02x",
++		DRIVER_VERSION >> 16,
++		(DRIVER_VERSION & 0xff00) >> 8,
++		DRIVER_VERSION & 0x00ff);
++
++	gc5025 = devm_kzalloc(dev, sizeof(*gc5025), GFP_KERNEL);
++	if (!gc5025)
++		return -ENOMEM;
++
++	// ret = of_property_read_u32(node, RKMODULE_CAMERA_MODULE_INDEX,
++	// 	&gc5025->module_index);
++	// ret |= of_property_read_string(node, RKMODULE_CAMERA_MODULE_FACING,
++	// 	&gc5025->module_facing);
++	// ret |= of_property_read_string(node, RKMODULE_CAMERA_MODULE_NAME,
++	// 	&gc5025->module_name);
++	// ret |= of_property_read_string(node, RKMODULE_CAMERA_LENS_NAME,
++	// 	&gc5025->len_name);
++	// if (ret) {
++	// 	dev_err(dev, "could not get module information!\n");
++	// 	return -EINVAL;
++	// }
++	gc5025->client = client;
++	gc5025->cur_mode = &supported_modes[0];
++
++	gc5025->xvclk = devm_clk_get(dev, "xvclk");
++	if (IS_ERR(gc5025->xvclk)) {
++		dev_err(dev, "Failed to get xvclk\n");
++		return -EINVAL;
++	}
++
++	// gc5025->power_gpio = devm_gpiod_get(dev, "power", GPIOD_OUT_LOW);
++	// if (IS_ERR(gc5025->power_gpio))
++	// 	dev_warn(dev, "Failed to get power-gpios\n");
++
++	gc5025->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
++	if (IS_ERR(gc5025->reset_gpio))
++		dev_warn(dev, "Failed to get reset-gpios\n");
++
++	// gc5025->pwdn_gpio = devm_gpiod_get(dev, "pwdn", GPIOD_OUT_LOW);
++	// if (IS_ERR(gc5025->pwdn_gpio))
++	// 	dev_warn(dev, "Failed to get pwdn-gpios\n");
++
++	ret = gc5025_configure_regulators(gc5025);
++	if (ret) {
++		dev_err(dev, "Failed to get power regulators\n");
++		return ret;
++	}
++
++	// gc5025->pinctrl = devm_pinctrl_get(dev);
++	// if (!IS_ERR(gc5025->pinctrl)) {
++	// 	gc5025->pins_default =
++	// 		pinctrl_lookup_state(gc5025->pinctrl,
++	// 				     OF_CAMERA_PINCTRL_STATE_DEFAULT);
++	// 	if (IS_ERR(gc5025->pins_default))
++	// 		dev_err(dev, "could not get default pinstate\n");
++
++	// 	gc5025->pins_sleep =
++	// 		pinctrl_lookup_state(gc5025->pinctrl,
++	// 				     OF_CAMERA_PINCTRL_STATE_SLEEP);
++	// 	if (IS_ERR(gc5025->pins_sleep))
++	// 		dev_err(dev, "could not get sleep pinstate\n");
++	// }
++
++	mutex_init(&gc5025->mutex);
++
++	sd = &gc5025->subdev;
++	v4l2_i2c_subdev_init(sd, client, &gc5025_subdev_ops);
++	ret = gc5025_initialize_controls(gc5025);
++	if (ret)
++		goto err_destroy_mutex;
++
++	ret = __gc5025_power_on(gc5025);
++	if (ret)
++		goto err_free_handler;
++
++	ret = gc5025_check_sensor_id(gc5025, client);
++	if (ret)
++		goto err_power_off;
++
++#ifdef CONFIG_VIDEO_V4L2_SUBDEV_API
++	sd->internal_ops = &gc5025_internal_ops;
++	sd->flags |= V4L2_SUBDEV_FL_HAS_DEVNODE |
++		     V4L2_SUBDEV_FL_HAS_EVENTS;
++#endif
++#if defined(CONFIG_MEDIA_CONTROLLER)
++	gc5025->pad.flags = MEDIA_PAD_FL_SOURCE;
++	sd->entity.function = MEDIA_ENT_F_CAM_SENSOR;
++	ret = media_entity_pads_init(&sd->entity, 1, &gc5025->pad);
++	if (ret < 0)
++		goto err_power_off;
++#endif
++
++	// memset(facing, 0, sizeof(facing));
++	// if (strcmp(gc5025->module_facing, "back") == 0)
++	// 	facing[0] = 'b';
++	// else
++	// 	facing[0] = 'f';
++
++	// snprintf(sd->name, sizeof(sd->name), "m%02d_%s_%s %s",
++	// 	 gc5025->module_index, facing,
++	// 	 GC5025_NAME, dev_name(sd->dev));
++	ret = v4l2_async_register_subdev_sensor(sd);
++	if (ret) {
++		dev_err(dev, "v4l2 async register subdev failed\n");
++		goto err_clean_entity;
++	}
++
++	pm_runtime_set_active(dev);
++	pm_runtime_enable(dev);
++	pm_runtime_idle(dev);
++
++	return 0;
++
++err_clean_entity:
++#if defined(CONFIG_MEDIA_CONTROLLER)
++	media_entity_cleanup(&sd->entity);
++#endif
++err_power_off:
++	__gc5025_power_off(gc5025);
++err_free_handler:
++	v4l2_ctrl_handler_free(&gc5025->ctrl_handler);
++err_destroy_mutex:
++	mutex_destroy(&gc5025->mutex);
++
++	return ret;
++}
++
++static void gc5025_remove(struct i2c_client *client)
++{
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct gc5025 *gc5025 = to_gc5025(sd);
++
++	v4l2_async_unregister_subdev(sd);
++#if defined(CONFIG_MEDIA_CONTROLLER)
++	media_entity_cleanup(&sd->entity);
++#endif
++	v4l2_ctrl_handler_free(&gc5025->ctrl_handler);
++	mutex_destroy(&gc5025->mutex);
++
++	pm_runtime_disable(&client->dev);
++	if (!pm_runtime_status_suspended(&client->dev))
++		__gc5025_power_off(gc5025);
++	pm_runtime_set_suspended(&client->dev);
++}
++
++#if IS_ENABLED(CONFIG_OF)
++static const struct of_device_id gc5025_of_match[] = {
++	{ .compatible = "galaxycore,gc5025" },
++	{},
++};
++MODULE_DEVICE_TABLE(of, gc5025_of_match);
++#endif
++
++static const struct i2c_device_id gc5025_match_id[] = {
++	{ "galaxycore,gc5025", 0 },
++	{ },
++};
++
++static struct i2c_driver gc5025_i2c_driver = {
++	.driver = {
++		.name = GC5025_NAME,
++		.pm = &gc5025_pm_ops,
++		.of_match_table = of_match_ptr(gc5025_of_match),
++	},
++	.probe		= &gc5025_probe,
++	.remove		= &gc5025_remove,
++	.id_table	= gc5025_match_id,
++};
++
++static int __init sensor_mod_init(void)
++{
++	return i2c_add_driver(&gc5025_i2c_driver);
++}
++
++static void __exit sensor_mod_exit(void)
++{
++	i2c_del_driver(&gc5025_i2c_driver);
++}
++
++device_initcall_sync(sensor_mod_init);
++module_exit(sensor_mod_exit);
++
++MODULE_DESCRIPTION("GalaxyCore gc5025 sensor driver");
++MODULE_LICENSE("GPL v2");
+diff -Naur linux/drivers/media/i2c/Kconfig orig-linux-sdm845-6.16-dev/drivers/media/i2c/Kconfig
+--- linux/drivers/media/i2c/Kconfig	2025-07-24 21:39:40.808973119 +0800
++++ orig-linux-sdm845-6.16-dev/drivers/media/i2c/Kconfig	2025-06-29 16:53:58.974167343 +0800
+@@ -100,6 +100,16 @@
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called gc2145.
+ 
++config VIDEO_GC5025
++	select V4L2_CCI_I2C
++	tristate "GalaxyCore GC5025 sensor support"
++	help
++	  This is a V4L2 sensor-level driver for GalaxyCore GC5025
++	  camera.
++
++	  To compile this driver as a module, choose M here: the
++	  module will be called gc5025.
++
+ config VIDEO_HI556
+ 	tristate "Hynix Hi-556 sensor support"
+ 	help
+@@ -750,6 +760,16 @@
+ 	  This is a V4L2 sensor driver for Samsung S5K5BAF 2M
+ 	  camera sensor with an embedded SoC image signal processor.
+ 
++config VIDEO_S5K3L6XX
++	tristate "Samsung S5K3L6XX sensor support"
++	depends on I2C && VIDEO_DEV
++	select MEDIA_CONTROLLER
++	select VIDEO_V4L2_SUBDEV_API
++	select V4L2_FWNODE
++	help
++	  This is a V4L2 sensor driver for Samsung S5K3L6XX 13M
++	  camera sensor with an embedded SoC image signal processor.
++
+ config VIDEO_S5K6A3
+ 	tristate "Samsung S5K6A3 sensor support"
+ 	help
+@@ -844,6 +864,17 @@
+ 	  BU64748 is a 12 bit DAC. This is designed for linear control
+ 	  of voice coil motors, controlled via I2C serial interface.
+ 
++config VIDEO_CN3927E
++	tristate "CN3927E lens voice coil support"
++	depends on I2C && VIDEO_DEV
++	select MEDIA_CONTROLLER
++	select VIDEO_V4L2_SUBDEV_API
++	help
++	  This is a driver for the CN3927E camera lens voice coil.
++	  CN3927E is a 10 bit DAC with 120mA output current sink
++	  capability. This is designed for linear control of
++	  voice coil motors, controlled via I2C serial interface.
++
+ config VIDEO_DW9714
+ 	tristate "DW9714 lens voice coil support"
+ 	depends on I2C && VIDEO_DEV
+diff -Naur linux/drivers/media/i2c/Makefile orig-linux-sdm845-6.16-dev/drivers/media/i2c/Makefile
+--- linux/drivers/media/i2c/Makefile	2025-07-24 21:39:40.808973119 +0800
++++ orig-linux-sdm845-6.16-dev/drivers/media/i2c/Makefile	2025-06-29 16:54:16.846164511 +0800
+@@ -26,6 +26,7 @@
+ obj-$(CONFIG_VIDEO_BU64748) += bu64748.o
+ obj-$(CONFIG_VIDEO_CCS) += ccs/
+ obj-$(CONFIG_VIDEO_CCS_PLL) += ccs-pll.o
++obj-$(CONFIG_VIDEO_CN3927E) += cn3927e.o
+ obj-$(CONFIG_VIDEO_CS3308) += cs3308.o
+ obj-$(CONFIG_VIDEO_CS5345) += cs5345.o
+ obj-$(CONFIG_VIDEO_CS53L32A) += cs53l32a.o
+@@ -42,6 +43,7 @@
+ obj-$(CONFIG_VIDEO_GC05A2) += gc05a2.o
+ obj-$(CONFIG_VIDEO_GC08A3) += gc08a3.o
+ obj-$(CONFIG_VIDEO_GC2145) += gc2145.o
++obj-$(CONFIG_VIDEO_GC5025) += gc5025.o
+ obj-$(CONFIG_VIDEO_HI556) += hi556.o
+ obj-$(CONFIG_VIDEO_HI846) += hi846.o
+ obj-$(CONFIG_VIDEO_HI847) += hi847.o
+@@ -127,6 +129,8 @@
+ obj-$(CONFIG_VIDEO_RDACM21) += rdacm21.o
+ obj-$(CONFIG_VIDEO_RJ54N1) += rj54n1cb0c.o
+ obj-$(CONFIG_VIDEO_S5C73M3) += s5c73m3/
++obj-$(CONFIG_VIDEO_S5K3L6XX) += s5k3l6.o
++obj-$(CONFIG_VIDEO_S5K3L6XX) += s5k3l6xx.o
+ obj-$(CONFIG_VIDEO_S5K5BAF) += s5k5baf.o
+ obj-$(CONFIG_VIDEO_S5K6A3) += s5k6a3.o
+ obj-$(CONFIG_VIDEO_SAA6588) += saa6588.o
+diff -Naur linux/drivers/media/i2c/s5k3l6.c orig-linux-sdm845-6.16-dev/drivers/media/i2c/s5k3l6.c
+--- linux/drivers/media/i2c/s5k3l6.c	1970-01-01 08:00:00.000000000 +0800
++++ orig-linux-sdm845-6.16-dev/drivers/media/i2c/s5k3l6.c	2025-03-15 15:45:10.896639600 +0800
+@@ -0,0 +1,1560 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * s5k3l6xx camera driver
++ *
++ * Copyright (C) 2022 Rockchip Electronics Co., Ltd.
++ *
++ * V0.0X01.0X00 first version.
++ * V0.0X01.0X01
++ * 1.add flip and mirror support
++ * 2.fix stream on sequential
++ *
++ */
++
++// #define DEBUG
++#include <linux/clk.h>
++#include <linux/device.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/pm_runtime.h>
++#include <linux/regulator/consumer.h>
++#include <linux/sysfs.h>
++#include <linux/slab.h>
++#include <linux/version.h>
++// #include <linux/compat.h>
++// #include <linux/rk-camera-module.h>
++#include <media/media-entity.h>
++#include <media/v4l2-async.h>
++#include <media/v4l2-ctrls.h>
++#include <media/v4l2-fwnode.h>
++#include <media/v4l2-subdev.h>
++#include <linux/pinctrl/consumer.h>
++
++#define DRIVER_VERSION			KERNEL_VERSION(0, 0x01, 0x01)
++
++#ifndef V4L2_CID_DIGITAL_GAIN
++#define V4L2_CID_DIGITAL_GAIN		V4L2_CID_GAIN
++#endif
++
++#define S5K3L6XX_LINK_FREQ_600MHZ	600000000U
++#define S5K3L6XX_LINK_FREQ_284MHZ	284000000U
++/* pixel rate = link frequency * 2 * lanes / BITS_PER_SAMPLE */
++#define S5K3L6XX_PIXEL_RATE		(S5K3L6XX_LINK_FREQ_600MHZ * 2LL * 4LL / 10LL)
++#define S5K3L6XX_XVCLK_FREQ		24000000
++
++#define CHIP_ID				0x30c6
++#define S5K3L6XX_REG_CHIP_ID		0x0000
++
++#define S5K3L6XX_REG_CTRL_MODE		0x0100
++#define S5K3L6XX_MODE_SW_STANDBY	0x0
++#define S5K3L6XX_MODE_STREAMING		BIT(0)
++#define S5K3L6XX_REG_STREAM_ON		0x3C1E
++
++#define S5K3L6XX_REG_EXPOSURE		0x0202
++#define	S5K3L6XX_EXPOSURE_MIN		1
++#define	S5K3L6XX_EXPOSURE_STEP		1
++#define S5K3L6XX_VTS_MAX		0xfff7
++
++#define S5K3L6XX_REG_ANALOG_GAIN	0x0204
++#define S5K3L6XX_GAIN_MIN		0x20
++#define S5K3L6XX_GAIN_MAX		0x200
++#define S5K3L6XX_GAIN_STEP		1
++#define S5K3L6XX_GAIN_DEFAULT		0x100
++
++#define S5K3L6XX_REG_TEST_PATTERN	0x0601
++#define	S5K3L6XX_TEST_PATTERN_ENABLE	0x80
++#define	S5K3L6XX_TEST_PATTERN_DISABLE	0x0
++
++#define S5K3L6XX_REG_VTS		0x0340
++
++#define REG_NULL			0xFFFF
++
++#define S5K3L6XX_REG_VALUE_08BIT	1
++#define S5K3L6XX_REG_VALUE_16BIT	2
++#define S5K3L6XX_REG_VALUE_24BIT	3
++
++#define S5K3L6XX_LANES			4
++#define S5K3L6XX_BITS_PER_SAMPLE	10
++
++#define S5K3L6XX_CHIP_REVISION_REG	0x0002
++
++// #define OF_CAMERA_PINCTRL_STATE_DEFAULT	"rockchip,camera_default"
++// #define OF_CAMERA_PINCTRL_STATE_SLEEP	"rockchip,camera_sleep"
++
++#define S5K3L6XX_NAME			"s5k3l6xx"
++
++// #define S5K3L6XX_MIRROR
++// #define S5K3L6XX_FLIP
++// #define S5K3L6XX_FLIP_MIRROR
++#ifdef S5K3L6XX_MIRROR
++#define S5K3L6XX_MEDIA_BUS_FMT		MEDIA_BUS_FMT_SRGGB8_1X8
++#elif defined S5K3L6XX_FLIP
++#define S5K3L6XX_MEDIA_BUS_FMT		MEDIA_BUS_FMT_SBGGR8_1X8
++#elif defined S5K3L6XX_FLIP_MIRROR
++#define S5K3L6XX_MEDIA_BUS_FMT		MEDIA_BUS_FMT_SGBRG8_1X8
++#else
++#define S5K3L6XX_MEDIA_BUS_FMT		MEDIA_BUS_FMT_SGRBG8_1X8
++#endif
++
++static const char * const s5k3l6xx_supply_names[] = {
++	"avdd",		/* Analog power */
++	"dovdd",	/* Digital I/O power */
++	"dvdd",		/* Digital core power */
++};
++
++#define S5K3L6XX_NUM_SUPPLIES ARRAY_SIZE(s5k3l6xx_supply_names)
++
++struct regval {
++	u16 addr;
++	u16 val;
++};
++
++struct s5k3l6xx_mode {
++	u32 width;
++	u32 height;
++	struct v4l2_fract max_fps;
++	u32 hts_def;
++	u32 vts_def;
++	u32 exp_def;
++	u32 link_freq_idx;
++	u32 bpp;
++	const struct regval *reg_list;
++};
++
++struct s5k3l6xx {
++	struct i2c_client	*client;
++	struct clk		*xvclk;
++	// struct gpio_desc	*power_gpio;
++	struct gpio_desc	*reset_gpio;
++	// struct gpio_desc	*pwdn_gpio;
++	struct regulator_bulk_data supplies[S5K3L6XX_NUM_SUPPLIES];
++
++	// struct pinctrl		*pinctrl;
++	// struct pinctrl_state	*pins_default;
++	// struct pinctrl_state	*pins_sleep;
++
++	struct v4l2_subdev	subdev;
++	struct media_pad	pad;
++	struct v4l2_ctrl_handler ctrl_handler;
++	struct v4l2_ctrl	*exposure;
++	struct v4l2_ctrl	*anal_gain;
++	struct v4l2_ctrl	*digi_gain;
++	struct v4l2_ctrl	*hblank;
++	struct v4l2_ctrl	*vblank;
++	struct v4l2_ctrl	*pixel_rate;
++	struct v4l2_ctrl	*link_freq;
++	struct v4l2_ctrl	*test_pattern;
++	struct mutex		mutex;
++	bool			streaming;
++	bool			power_on;
++	const struct s5k3l6xx_mode *cur_mode;
++	// u32			module_index;
++	// const char		*module_facing;
++	// const char		*module_name;
++	// const char		*len_name;
++};
++
++#define to_s5k3l6xx(sd) container_of(sd, struct s5k3l6xx, subdev)
++
++static const struct regval s5k3l6xx_4208x3120_30fps_regs[] = {
++#ifdef S5K3L6XX_MIRROR
++	{0x0100, 0x0001},
++#elif defined S5K3L6XX_FLIP
++	{0x0100, 0x0002},
++#elif defined S5K3L6XX_FLIP_MIRROR
++	{0x0100, 0x0003},
++#else
++	{0x0100, 0x0000},
++#endif
++	{0x0000, 0x0060},
++	{0x0000, 0x30C6},
++	{0x0A02, 0x3400},
++	{0x3084, 0x1314},
++	{0x3266, 0x0001},
++	{0x3242, 0x2020},
++	{0x306A, 0x2F4C},
++	{0x306C, 0xCA01},
++	{0x307A, 0x0D20},
++	{0x309E, 0x002D},
++	{0x3072, 0x0013},
++	{0x3074, 0x0977},
++	{0x3076, 0x9411},
++	{0x3024, 0x0016},
++	{0x3070, 0x3D00},
++	{0x3002, 0x0E00},
++	{0x3006, 0x1000},
++	{0x300A, 0x0C00},
++	{0x3010, 0x0400},
++	{0x3018, 0xC500},
++	{0x303A, 0x0204},
++	{0x3452, 0x0001},
++	{0x3454, 0x0001},
++	{0x3456, 0x0001},
++	{0x3458, 0x0001},
++	{0x345a, 0x0002},
++	{0x345C, 0x0014},
++	{0x345E, 0x0002},
++	{0x3460, 0x0014},
++	{0x3464, 0x0006},
++	{0x3466, 0x0012},
++	{0x3468, 0x0012},
++	{0x346A, 0x0012},
++	{0x346C, 0x0012},
++	{0x346E, 0x0012},
++	{0x3470, 0x0012},
++	{0x3472, 0x0008},
++	{0x3474, 0x0004},
++	{0x3476, 0x0044},
++	{0x3478, 0x0004},
++	{0x347A, 0x0044},
++	{0x347E, 0x0006},
++	{0x3480, 0x0010},
++	{0x3482, 0x0010},
++	{0x3484, 0x0010},
++	{0x3486, 0x0010},
++	{0x3488, 0x0010},
++	{0x348A, 0x0010},
++	{0x348E, 0x000C},
++	{0x3490, 0x004C},
++	{0x3492, 0x000C},
++	{0x3494, 0x004C},
++	{0x3496, 0x0020},
++	{0x3498, 0x0006},
++	{0x349A, 0x0008},
++	{0x349C, 0x0008},
++	{0x349E, 0x0008},
++	{0x34A0, 0x0008},
++	{0x34A2, 0x0008},
++	{0x34A4, 0x0008},
++	{0x34A8, 0x001A},
++	{0x34AA, 0x002A},
++	{0x34AC, 0x001A},
++	{0x34AE, 0x002A},
++	{0x34B0, 0x0080},
++	{0x34B2, 0x0006},
++	{0x32A2, 0x0000},
++	{0x32A4, 0x0000},
++	{0x32A6, 0x0000},
++	{0x32A8, 0x0000},
++	{0x0344, 0x0008},
++	{0x0346, 0x0008},
++	{0x0348, 0x1077},
++	{0x034A, 0x0C37},
++	{0x034C, 0x1070},
++	{0x034E, 0x0C30},
++	{0x0900, 0x0000},
++	{0x0380, 0x0001},
++	{0x0382, 0x0001},
++	{0x0384, 0x0001},
++	{0x0386, 0x0001},
++	{0x0114, 0x0330},
++	{0x0110, 0x0002},
++	{0x0136, 0x1800},
++	{0x0304, 0x0004},
++	{0x0306, 0x0078},
++	{0x3C1E, 0x0000},
++	{0x030C, 0x0004},
++	{0x030E, 0x0064},
++	{0x3C16, 0x0000},
++	{0x0300, 0x0006},
++	{0x0342, 0x1320},
++	{0x0340, 0x0CBC},
++	{0x38C4, 0x0009},
++	{0x38D8, 0x002A},
++	{0x38DA, 0x000A},
++	{0x38DC, 0x000B},
++	{0x38C2, 0x000A},
++	{0x38C0, 0x000F},
++	{0x38D6, 0x000A},
++	{0x38D4, 0x0009},
++	{0x38B0, 0x000F},
++	{0x3932, 0x1000},
++	{0x3934, 0x0180},
++	{0x3938, 0x000C},
++	{0x0820, 0x04B0},
++	{0x380C, 0x0090},
++	{0x3064, 0xEFCF},
++	{0x309C, 0x0640},
++	{0x3090, 0x8800},
++	{0x3238, 0x000C},
++	{0x314A, 0x5F00},
++	{0x32B2, 0x0000},
++	{0x32B4, 0x0000},
++	{0x32B6, 0x0000},
++	{0x32B8, 0x0000},
++	{0x3300, 0x0000},
++	{0x3400, 0x0000},
++	{0x3402, 0x4E42},
++	{0x32B2, 0x0006},
++	{0x32B4, 0x0006},
++	{0x32B6, 0x0006},
++	{0x32B8, 0x0006},
++	{0x3C34, 0x0008},
++	{0x3C36, 0x0000},
++	{0x3C38, 0x0000},
++	{0x393E, 0x4000},
++	{REG_NULL, 0x0000},
++};
++
++static const struct regval s5k3l6xx_2104x1560_30fps_regs[] = {
++#ifdef S5K3L6XX_MIRROR
++	{0x0100, 0x0001},
++#elif defined S5K3L6XX_FLIP
++	{0x0100, 0x0002},
++#elif defined S5K3L6XX_FLIP_MIRROR
++	{0x0100, 0x0003},
++#else
++	{0x0100, 0x0000},
++#endif
++	{0x0000, 0x0050},
++	{0x0000, 0x30C6},
++	{0x0A02, 0x3400},
++	{0x3084, 0x1314},
++	{0x3266, 0x0001},
++	{0x3242, 0x2020},
++	{0x306A, 0x2F4C},
++	{0x306C, 0xCA01},
++	{0x307A, 0x0D20},
++	{0x309E, 0x002D},
++	{0x3072, 0x0013},
++	{0x3074, 0x0977},
++	{0x3076, 0x9411},
++	{0x3024, 0x0016},
++	{0x3070, 0x3D00},
++	{0x3002, 0x0E00},
++	{0x3006, 0x1000},
++	{0x300A, 0x0C00},
++	{0x3010, 0x0400},
++	{0x3018, 0xC500},
++	{0x303A, 0x0204},
++	{0x3452, 0x0001},
++	{0x3454, 0x0001},
++	{0x3456, 0x0001},
++	{0x3458, 0x0001},
++	{0x345a, 0x0002},
++	{0x345C, 0x0014},
++	{0x345E, 0x0002},
++	{0x3460, 0x0014},
++	{0x3464, 0x0006},
++	{0x3466, 0x0012},
++	{0x3468, 0x0012},
++	{0x346A, 0x0012},
++	{0x346C, 0x0012},
++	{0x346E, 0x0012},
++	{0x3470, 0x0012},
++	{0x3472, 0x0008},
++	{0x3474, 0x0004},
++	{0x3476, 0x0044},
++	{0x3478, 0x0004},
++	{0x347A, 0x0044},
++	{0x347E, 0x0006},
++	{0x3480, 0x0010},
++	{0x3482, 0x0010},
++	{0x3484, 0x0010},
++	{0x3486, 0x0010},
++	{0x3488, 0x0010},
++	{0x348A, 0x0010},
++	{0x348E, 0x000C},
++	{0x3490, 0x004C},
++	{0x3492, 0x000C},
++	{0x3494, 0x004C},
++	{0x3496, 0x0020},
++	{0x3498, 0x0006},
++	{0x349A, 0x0008},
++	{0x349C, 0x0008},
++	{0x349E, 0x0008},
++	{0x34A0, 0x0008},
++	{0x34A2, 0x0008},
++	{0x34A4, 0x0008},
++	{0x34A8, 0x001A},
++	{0x34AA, 0x002A},
++	{0x34AC, 0x001A},
++	{0x34AE, 0x002A},
++	{0x34B0, 0x0080},
++	{0x34B2, 0x0006},
++	{0x32A2, 0x0000},
++	{0x32A4, 0x0000},
++	{0x32A6, 0x0000},
++	{0x32A8, 0x0000},
++	{0x3066, 0x7E00},
++	{0x3004, 0x0800},
++	//mode setting
++	{0x0344, 0x0008},
++	{0x0346, 0x0008},
++	{0x0348, 0x1077},
++	{0x034A, 0x0C37},
++	{0x034C, 0x0838},
++	{0x034E, 0x0618},
++	{0x0900, 0x0122},
++	{0x0380, 0x0001},
++	{0x0382, 0x0001},
++	{0x0384, 0x0001},
++	{0x0386, 0x0003},
++	{0x0114, 0x0330},
++	{0x0110, 0x0002},
++	{0x0136, 0x1800},
++	{0x0304, 0x0004},
++	{0x0306, 0x0078},
++	{0x3C1E, 0x0000},
++	{0x030C, 0x0003},
++	{0x030E, 0x0047},
++	{0x3C16, 0x0001},
++	{0x0300, 0x0006},
++	{0x0342, 0x1320},
++	{0x0340, 0x0CBC},
++	{0x38C4, 0x0004},
++	{0x38D8, 0x0011},
++	{0x38DA, 0x0005},
++	{0x38DC, 0x0005},
++	{0x38C2, 0x0005},
++	{0x38C0, 0x0004},
++	{0x38D6, 0x0004},
++	{0x38D4, 0x0004},
++	{0x38B0, 0x0007},
++	{0x3932, 0x1000},
++	{0x3934, 0x0180},
++	{0x3938, 0x000C},
++	{0x0820, 0x0238},
++	{0x380C, 0x0049},
++	{0x3064, 0xFFCF},
++	{0x309C, 0x0640},
++	{0x3090, 0x8000},
++	{0x3238, 0x000B},
++	{0x314A, 0x5F02},
++	{0x3300, 0x0000},
++	{0x3400, 0x0000},
++	{0x3402, 0x4E46},
++	{0x32B2, 0x0008},
++	{0x32B4, 0x0008},
++	{0x32B6, 0x0008},
++	{0x32B8, 0x0008},
++	{0x3C34, 0x0048},
++	{0x3C36, 0x3000},
++	{0x3C38, 0x0020},
++	{0x393E, 0x4000},
++	{0x303A, 0x0204},
++	{0x3034, 0x4B01},
++	{0x3036, 0x0029},
++	{0x3032, 0x4800},
++	{0x320E, 0x049E},
++	{REG_NULL, 0x0000},
++};
++
++static const struct s5k3l6xx_mode supported_modes[] = {
++	{
++		.width = 4208,
++		.height = 3120,
++		.max_fps = {
++			.numerator = 1, //10000
++			.denominator = 30, //300000
++		},
++		.exp_def = 0x0cb0,
++		.hts_def = 0x1320,
++		.vts_def = 0x0cbc,
++		.bpp = 10,
++		.reg_list = s5k3l6xx_4208x3120_30fps_regs,
++		.link_freq_idx = 0,
++	},
++	{
++		.width = 2104,
++		.height = 1560,
++		.max_fps = {
++			.numerator = 1, //10000
++			.denominator = 30, //300000
++		},
++		.exp_def = 0x0cb0,
++		.hts_def = 0x1320,
++		.vts_def = 0x0cbc,
++		.bpp = 10,
++		.reg_list = s5k3l6xx_2104x1560_30fps_regs,
++		.link_freq_idx = 1,
++	},
++};
++
++static const s64 link_freq_items[] = {
++	S5K3L6XX_LINK_FREQ_600MHZ,
++	S5K3L6XX_LINK_FREQ_284MHZ,
++};
++
++static const char * const s5k3l6xx_test_pattern_menu[] = {
++	"Disabled",
++	"Vertical Color Bar Type 1",
++	"Vertical Color Bar Type 2",
++	"Vertical Color Bar Type 3"
++};
++
++/* Write registers up to 4 at a time */
++static int s5k3l6xx_write_reg(struct i2c_client *client, u16 reg,
++			     u32 len, u32 val)
++{
++	u32 buf_i, val_i;
++	u8 buf[6];
++	u8 *val_p;
++	__be32 val_be;
++
++	dev_dbg(&client->dev, "write reg(0x%x val:0x%x)!\n", reg, val);
++
++	if (len > 4)
++		return -EINVAL;
++
++	buf[0] = reg >> 8;
++	buf[1] = reg & 0xff;
++
++	val_be = cpu_to_be32(val);
++	val_p = (u8 *)&val_be;
++	buf_i = 2;
++	val_i = 4 - len;
++
++	while (val_i < 4)
++		buf[buf_i++] = val_p[val_i++];
++
++	if (i2c_master_send(client, buf, len + 2) != len + 2)
++		return -EIO;
++
++	return 0;
++}
++
++static int s5k3l6xx_write_array(struct i2c_client *client,
++			       const struct regval *regs)
++{
++	u32 i;
++	int ret = 0;
++
++	for (i = 0; ret == 0 && regs[i].addr != REG_NULL; i++)
++		ret = s5k3l6xx_write_reg(client, regs[i].addr,
++					S5K3L6XX_REG_VALUE_16BIT,
++					regs[i].val);
++
++	return ret;
++}
++
++/* Read registers up to 4 at a time */
++static int s5k3l6xx_read_reg(struct i2c_client *client, u16 reg,
++			    unsigned int len, u32 *val)
++{
++	struct i2c_msg msgs[2];
++	u8 *data_be_p;
++	__be32 data_be = 0;
++	__be16 reg_addr_be = cpu_to_be16(reg);
++	int ret;
++
++	if (len > 4 || !len)
++		return -EINVAL;
++
++	data_be_p = (u8 *)&data_be;
++	/* Write register address */
++	msgs[0].addr = client->addr;
++	msgs[0].flags = 0;
++	msgs[0].len = 2;
++	msgs[0].buf = (u8 *)&reg_addr_be;
++
++	/* Read data from register */
++	msgs[1].addr = client->addr;
++	msgs[1].flags = I2C_M_RD;
++	msgs[1].len = len;
++	msgs[1].buf = &data_be_p[4 - len];
++
++	ret = i2c_transfer(client->adapter, msgs, ARRAY_SIZE(msgs));
++	if (ret != ARRAY_SIZE(msgs))
++		return -EIO;
++
++	*val = be32_to_cpu(data_be);
++
++	return 0;
++}
++
++static int s5k3l6xx_get_reso_dist(const struct s5k3l6xx_mode *mode,
++				 struct v4l2_mbus_framefmt *framefmt)
++{
++	return abs(mode->width - framefmt->width) +
++	       abs(mode->height - framefmt->height);
++}
++
++static const struct s5k3l6xx_mode *
++s5k3l6xx_find_best_fit(struct v4l2_subdev_format *fmt)
++{
++	struct v4l2_mbus_framefmt *framefmt = &fmt->format;
++	int dist;
++	int cur_best_fit = 0;
++	int cur_best_fit_dist = -1;
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(supported_modes); i++) {
++		dist = s5k3l6xx_get_reso_dist(&supported_modes[i], framefmt);
++		if (cur_best_fit_dist == -1 || dist < cur_best_fit_dist) {
++			cur_best_fit_dist = dist;
++			cur_best_fit = i;
++		}
++	}
++
++	return &supported_modes[cur_best_fit];
++}
++
++static int s5k3l6xx_set_fmt(struct v4l2_subdev *sd,
++			   struct v4l2_subdev_state *sd_state,
++			  struct v4l2_subdev_format *fmt)
++{
++	struct s5k3l6xx *s5k3l6xx = to_s5k3l6xx(sd);
++	const struct s5k3l6xx_mode *mode;
++	s64 h_blank, vblank_def;
++	u64 pixel_rate = 0;
++	u32 lane_num = S5K3L6XX_LANES;
++
++	mutex_lock(&s5k3l6xx->mutex);
++
++	mode = s5k3l6xx_find_best_fit(fmt);
++	fmt->format.code = S5K3L6XX_MEDIA_BUS_FMT;
++	fmt->format.width = mode->width;
++	fmt->format.height = mode->height;
++	fmt->format.field = V4L2_FIELD_NONE;
++	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
++#ifdef CONFIG_VIDEO_V4L2_SUBDEV_API
++		*v4l2_subdev_state_get_format(sd_state, fmt->pad) = fmt->format;
++#else
++		mutex_unlock(&s5k3l6xx->mutex);
++		return -ENOTTY;
++#endif
++	} else {
++		s5k3l6xx->cur_mode = mode;
++		h_blank = mode->hts_def - mode->width;
++		__v4l2_ctrl_modify_range(s5k3l6xx->hblank, h_blank,
++					 h_blank, 1, h_blank);
++		vblank_def = mode->vts_def - mode->height;
++		__v4l2_ctrl_modify_range(s5k3l6xx->vblank, vblank_def,
++					 S5K3L6XX_VTS_MAX - mode->height,
++					 1, vblank_def);
++		pixel_rate = (u32)link_freq_items[mode->link_freq_idx] / mode->bpp * 2 * lane_num;
++
++		__v4l2_ctrl_s_ctrl_int64(s5k3l6xx->pixel_rate,
++					 pixel_rate);
++		__v4l2_ctrl_s_ctrl(s5k3l6xx->link_freq,
++				   mode->link_freq_idx);
++	}
++
++	mutex_unlock(&s5k3l6xx->mutex);
++
++	return 0;
++}
++
++static int s5k3l6xx_get_fmt(struct v4l2_subdev *sd,
++			   struct v4l2_subdev_state *sd_state,
++			   struct v4l2_subdev_format *fmt)
++{
++	struct s5k3l6xx *s5k3l6xx = to_s5k3l6xx(sd);
++	const struct s5k3l6xx_mode *mode = s5k3l6xx->cur_mode;
++
++	mutex_lock(&s5k3l6xx->mutex);
++	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
++#ifdef CONFIG_VIDEO_V4L2_SUBDEV_API
++		fmt->format = *v4l2_subdev_state_get_format(sd_state, fmt->pad);
++#else
++		mutex_unlock(&s5k3l6xx->mutex);
++		return -ENOTTY;
++#endif
++	} else {
++		fmt->format.width = mode->width;
++		fmt->format.height = mode->height;
++		fmt->format.code = S5K3L6XX_MEDIA_BUS_FMT;
++		fmt->format.field = V4L2_FIELD_NONE;
++	}
++	mutex_unlock(&s5k3l6xx->mutex);
++
++	return 0;
++}
++
++static int s5k3l6xx_enum_mbus_code(struct v4l2_subdev *sd,
++				  struct v4l2_subdev_state *sd_state,
++				  struct v4l2_subdev_mbus_code_enum *code)
++{
++	if (code->index != 0)
++		return -EINVAL;
++	code->code = S5K3L6XX_MEDIA_BUS_FMT;
++
++	return 0;
++}
++
++static int s5k3l6xx_enum_frame_sizes(struct v4l2_subdev *sd,
++				    struct v4l2_subdev_state *sd_state,
++				   struct v4l2_subdev_frame_size_enum *fse)
++{
++	if (fse->index >= ARRAY_SIZE(supported_modes))
++		return -EINVAL;
++
++	if (fse->code != S5K3L6XX_MEDIA_BUS_FMT)
++		return -EINVAL;
++
++	fse->min_width  = supported_modes[fse->index].width;
++	fse->max_width  = supported_modes[fse->index].width;
++	fse->max_height = supported_modes[fse->index].height;
++	fse->min_height = supported_modes[fse->index].height;
++
++	return 0;
++}
++
++static int s5k3l6xx_enable_test_pattern(struct s5k3l6xx *s5k3l6xx, u32 pattern)
++{
++	u32 val;
++
++	if (pattern)
++		val = (pattern - 1) | S5K3L6XX_TEST_PATTERN_ENABLE;
++	else
++		val = S5K3L6XX_TEST_PATTERN_DISABLE;
++
++	return s5k3l6xx_write_reg(s5k3l6xx->client,
++				 S5K3L6XX_REG_TEST_PATTERN,
++				 S5K3L6XX_REG_VALUE_08BIT,
++				 val);
++}
++
++static int s5k3l6xx_g_frame_interval(struct v4l2_subdev *sd,
++					struct v4l2_subdev_state *sd_state,
++				    struct v4l2_subdev_frame_interval *fi)
++{
++	struct s5k3l6xx *s5k3l6xx = to_s5k3l6xx(sd);
++	const struct s5k3l6xx_mode *mode = s5k3l6xx->cur_mode;
++
++	if (fi->which != V4L2_SUBDEV_FORMAT_ACTIVE)
++		return -EINVAL;
++
++	mutex_lock(&s5k3l6xx->mutex);
++	fi->interval = mode->max_fps;
++	mutex_unlock(&s5k3l6xx->mutex);
++
++	return 0;
++}
++
++// static void s5k3l6xx_get_module_inf(struct s5k3l6xx *s5k3l6xx,
++// 				   struct rkmodule_inf *inf)
++// {
++// 	memset(inf, 0, sizeof(*inf));
++// 	strscpy(inf->base.sensor, S5K3L6XX_NAME, sizeof(inf->base.sensor));
++// 	strscpy(inf->base.module, s5k3l6xx->module_name,
++// 		sizeof(inf->base.module));
++// 	strscpy(inf->base.lens, s5k3l6xx->len_name, sizeof(inf->base.lens));
++// }
++
++// static long s5k3l6xx_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
++// {
++// 	struct s5k3l6xx *s5k3l6xx = to_s5k3l6xx(sd);
++// 	long ret = 0;
++// 	u32 stream = 0;
++
++// 	switch (cmd) {
++// 	case RKMODULE_GET_MODULE_INFO:
++// 		s5k3l6xx_get_module_inf(s5k3l6xx, (struct rkmodule_inf *)arg);
++// 		break;
++// 	case RKMODULE_SET_QUICK_STREAM:
++
++// 		stream = *((u32 *)arg);
++
++// 		if (stream)
++// 			ret = s5k3l6xx_write_reg(s5k3l6xx->client,
++// 				 S5K3L6XX_REG_CTRL_MODE,
++// 				 S5K3L6XX_REG_VALUE_08BIT,
++// 				 S5K3L6XX_MODE_STREAMING);
++// 		else
++// 			ret = s5k3l6xx_write_reg(s5k3l6xx->client,
++// 				 S5K3L6XX_REG_CTRL_MODE,
++// 				 S5K3L6XX_REG_VALUE_08BIT,
++// 				 S5K3L6XX_MODE_SW_STANDBY);
++// 		break;
++// 	default:
++// 		ret = -ENOIOCTLCMD;
++// 		break;
++// 	}
++
++// 	return ret;
++// }
++
++// #ifdef CONFIG_COMPAT
++// static long s5k3l6xx_compat_ioctl32(struct v4l2_subdev *sd,
++// 				   unsigned int cmd, unsigned long arg)
++// {
++// 	void __user *up = compat_ptr(arg);
++// 	struct rkmodule_inf *inf;
++// 	struct rkmodule_awb_cfg *cfg;
++// 	long ret = 0;
++// 	u32 stream = 0;
++
++// 	switch (cmd) {
++// 	case RKMODULE_GET_MODULE_INFO:
++// 		inf = kzalloc(sizeof(*inf), GFP_KERNEL);
++// 		if (!inf) {
++// 			ret = -ENOMEM;
++// 			return ret;
++// 		}
++
++// 		ret = s5k3l6xx_ioctl(sd, cmd, inf);
++// 		if (!ret) {
++// 			ret = copy_to_user(up, inf, sizeof(*inf));
++// 			if (ret)
++// 				ret = -EFAULT;
++// 		}
++// 		kfree(inf);
++// 		break;
++// 	case RKMODULE_AWB_CFG:
++// 		cfg = kzalloc(sizeof(*cfg), GFP_KERNEL);
++// 		if (!cfg) {
++// 			ret = -ENOMEM;
++// 			return ret;
++// 		}
++
++// 		ret = copy_from_user(cfg, up, sizeof(*cfg));
++// 		if (!ret)
++// 			ret = s5k3l6xx_ioctl(sd, cmd, cfg);
++// 		else
++// 			ret = -EFAULT;
++// 		kfree(cfg);
++// 		break;
++// 	case RKMODULE_SET_QUICK_STREAM:
++// 		ret = copy_from_user(&stream, up, sizeof(u32));
++// 		if (!ret)
++// 			ret = s5k3l6xx_ioctl(sd, cmd, &stream);
++// 		else
++// 			ret = -EFAULT;
++// 		break;
++// 	default:
++// 		ret = -ENOIOCTLCMD;
++// 		break;
++// 	}
++
++// 	return ret;
++// }
++// #endif
++
++static int __s5k3l6xx_start_stream(struct s5k3l6xx *s5k3l6xx)
++{
++	int ret;
++
++	ret = s5k3l6xx_write_array(s5k3l6xx->client, s5k3l6xx->cur_mode->reg_list);
++	if (ret)
++		return ret;
++
++	/* In case these controls are set before streaming */
++	mutex_unlock(&s5k3l6xx->mutex);
++	ret = v4l2_ctrl_handler_setup(&s5k3l6xx->ctrl_handler);
++	mutex_lock(&s5k3l6xx->mutex);
++	if (ret)
++		return ret;
++
++	s5k3l6xx_write_reg(s5k3l6xx->client,
++				 S5K3L6XX_REG_STREAM_ON,
++				 S5K3L6XX_REG_VALUE_08BIT,
++				 S5K3L6XX_MODE_STREAMING);
++	s5k3l6xx_write_reg(s5k3l6xx->client,
++				 S5K3L6XX_REG_CTRL_MODE,
++				 S5K3L6XX_REG_VALUE_08BIT,
++				 S5K3L6XX_MODE_STREAMING);
++	s5k3l6xx_write_reg(s5k3l6xx->client,
++				 S5K3L6XX_REG_STREAM_ON,
++				 S5K3L6XX_REG_VALUE_08BIT,
++				 S5K3L6XX_MODE_SW_STANDBY);
++	return 0;
++}
++
++static int __s5k3l6xx_stop_stream(struct s5k3l6xx *s5k3l6xx)
++{
++	return s5k3l6xx_write_reg(s5k3l6xx->client,
++				 S5K3L6XX_REG_CTRL_MODE,
++				 S5K3L6XX_REG_VALUE_08BIT,
++				 S5K3L6XX_MODE_SW_STANDBY);
++}
++
++static int s5k3l6xx_s_stream(struct v4l2_subdev *sd, int on)
++{
++	struct s5k3l6xx *s5k3l6xx = to_s5k3l6xx(sd);
++	struct i2c_client *client = s5k3l6xx->client;
++	int ret = 0;
++
++	dev_info(&client->dev, "%s: on: %d, %dx%d@%d\n", __func__, on,
++				s5k3l6xx->cur_mode->width,
++				s5k3l6xx->cur_mode->height,
++		DIV_ROUND_CLOSEST(s5k3l6xx->cur_mode->max_fps.denominator,
++				  s5k3l6xx->cur_mode->max_fps.numerator));
++
++	mutex_lock(&s5k3l6xx->mutex);
++	on = !!on;
++	if (on == s5k3l6xx->streaming)
++		goto unlock_and_return;
++
++	if (on) {
++		ret = pm_runtime_get_sync(&client->dev);
++		if (ret < 0) {
++			pm_runtime_put_noidle(&client->dev);
++			goto unlock_and_return;
++		}
++
++		ret = __s5k3l6xx_start_stream(s5k3l6xx);
++		if (ret) {
++			v4l2_err(sd, "start stream failed while write regs\n");
++			pm_runtime_put(&client->dev);
++			goto unlock_and_return;
++		}
++	} else {
++		__s5k3l6xx_stop_stream(s5k3l6xx);
++		pm_runtime_put(&client->dev);
++	}
++
++	s5k3l6xx->streaming = on;
++
++unlock_and_return:
++	mutex_unlock(&s5k3l6xx->mutex);
++
++	return ret;
++}
++
++static int s5k3l6xx_s_power(struct v4l2_subdev *sd, int on)
++{
++	struct s5k3l6xx *s5k3l6xx = to_s5k3l6xx(sd);
++	struct i2c_client *client = s5k3l6xx->client;
++	int ret = 0;
++
++	mutex_lock(&s5k3l6xx->mutex);
++
++	/* If the power state is not modified - no work to do. */
++	if (s5k3l6xx->power_on == !!on)
++		goto unlock_and_return;
++
++	if (on) {
++		ret = pm_runtime_get_sync(&client->dev);
++		if (ret < 0) {
++			pm_runtime_put_noidle(&client->dev);
++			goto unlock_and_return;
++		}
++
++		s5k3l6xx->power_on = true;
++	} else {
++		pm_runtime_put(&client->dev);
++		s5k3l6xx->power_on = false;
++	}
++
++unlock_and_return:
++	mutex_unlock(&s5k3l6xx->mutex);
++
++	return ret;
++}
++
++/* Calculate the delay in us by clock rate and clock cycles */
++static inline u32 s5k3l6xx_cal_delay(u32 cycles)
++{
++	return DIV_ROUND_UP(cycles, S5K3L6XX_XVCLK_FREQ / 1000 / 1000);
++}
++
++static int __s5k3l6xx_power_on(struct s5k3l6xx *s5k3l6xx)
++{
++	int ret;
++	u32 delay_us;
++	struct device *dev = &s5k3l6xx->client->dev;
++
++	// if (!IS_ERR(s5k3l6xx->power_gpio))
++	// 	gpiod_set_value_cansleep(s5k3l6xx->power_gpio, 1);
++
++	// usleep_range(1000, 2000);
++
++	// if (!IS_ERR_OR_NULL(s5k3l6xx->pins_default)) {
++	// 	ret = pinctrl_select_state(s5k3l6xx->pinctrl,
++	// 				   s5k3l6xx->pins_default);
++	// 	if (ret < 0)
++	// 		dev_err(dev, "could not set pins\n");
++	// }
++	ret = regulator_bulk_enable(S5K3L6XX_NUM_SUPPLIES, s5k3l6xx->supplies);
++	if (ret < 0) {
++		dev_err(dev, "Failed to enable regulators\n");
++		goto disable_clk;
++	}
++
++	usleep_range(10, 20);
++
++	if (clk_get_rate(s5k3l6xx->xvclk) != S5K3L6XX_XVCLK_FREQ)
++		dev_warn(dev, "xvclk mismatched, modes are based on 24MHz\n");
++	ret = clk_set_rate(s5k3l6xx->xvclk, S5K3L6XX_XVCLK_FREQ);
++	if (ret < 0)
++		dev_warn(dev, "Failed to set xvclk rate (24MHz)\n");
++	ret = clk_prepare_enable(s5k3l6xx->xvclk);
++	if (ret < 0) {
++		dev_err(dev, "Failed to enable xvclk\n");
++		return ret;
++	}
++
++	usleep_range(1000,15000);
++
++	if (!IS_ERR(s5k3l6xx->reset_gpio))
++		gpiod_set_value_cansleep(s5k3l6xx->reset_gpio, 0);
++	usleep_range(400, 800);
++	if (!IS_ERR(s5k3l6xx->reset_gpio))
++		gpiod_set_value_cansleep(s5k3l6xx->reset_gpio, 1);
++	usleep_range(400, 800);
++	if (!IS_ERR(s5k3l6xx->reset_gpio))
++		gpiod_set_value_cansleep(s5k3l6xx->reset_gpio, 0);
++
++	// usleep_range(500, 1000);
++	// if (!IS_ERR(s5k3l6xx->pwdn_gpio))
++	// 	gpiod_set_value_cansleep(s5k3l6xx->pwdn_gpio, 1);
++
++	/* 8192 cycles prior to first SCCB transaction */
++	delay_us = s5k3l6xx_cal_delay(8192);
++	usleep_range(delay_us, delay_us * 2);
++
++	return 0;
++
++disable_clk:
++	// clk_disable_unprepare(s5k3l6xx->xvclk);
++	regulator_bulk_disable(S5K3L6XX_NUM_SUPPLIES, s5k3l6xx->supplies);
++
++	return ret;
++}
++
++static void __s5k3l6xx_power_off(struct s5k3l6xx *s5k3l6xx)
++{
++	// int ret;
++	// struct device *dev = &s5k3l6xx->client->dev;
++
++	// if (!IS_ERR(s5k3l6xx->pwdn_gpio))
++	// 	gpiod_set_value_cansleep(s5k3l6xx->pwdn_gpio, 0);
++	if (!IS_ERR(s5k3l6xx->reset_gpio))
++		gpiod_set_value_cansleep(s5k3l6xx->reset_gpio, 1);
++
++	clk_disable_unprepare(s5k3l6xx->xvclk);
++	// if (!IS_ERR_OR_NULL(s5k3l6xx->pins_sleep)) {
++	// 	ret = pinctrl_select_state(s5k3l6xx->pinctrl,
++	// 				   s5k3l6xx->pins_sleep);
++	// 	if (ret < 0)
++	// 		dev_dbg(dev, "could not set pins\n");
++	// }
++	// if (!IS_ERR(s5k3l6xx->power_gpio))
++	// 	gpiod_set_value_cansleep(s5k3l6xx->power_gpio, 0);
++
++	regulator_bulk_disable(S5K3L6XX_NUM_SUPPLIES, s5k3l6xx->supplies);
++}
++
++static int __maybe_unused s5k3l6xx_runtime_resume(struct device *dev)
++{
++	struct i2c_client *client = to_i2c_client(dev);
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct s5k3l6xx *s5k3l6xx = to_s5k3l6xx(sd);
++
++	return __s5k3l6xx_power_on(s5k3l6xx);
++}
++
++static int __maybe_unused s5k3l6xx_runtime_suspend(struct device *dev)
++{
++	struct i2c_client *client = to_i2c_client(dev);
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct s5k3l6xx *s5k3l6xx = to_s5k3l6xx(sd);
++
++	__s5k3l6xx_power_off(s5k3l6xx);
++
++	return 0;
++}
++
++#ifdef CONFIG_VIDEO_V4L2_SUBDEV_API
++static int s5k3l6xx_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
++{
++	struct s5k3l6xx *s5k3l6xx = to_s5k3l6xx(sd);
++	struct v4l2_mbus_framefmt *try_fmt =
++				v4l2_subdev_state_get_format(fh->state, 0);
++	const struct s5k3l6xx_mode *def_mode = &supported_modes[0];
++
++	mutex_lock(&s5k3l6xx->mutex);
++	/* Initialize try_fmt */
++	try_fmt->width = def_mode->width;
++	try_fmt->height = def_mode->height;
++	try_fmt->code = S5K3L6XX_MEDIA_BUS_FMT;
++	try_fmt->field = V4L2_FIELD_NONE;
++
++	mutex_unlock(&s5k3l6xx->mutex);
++	/* No crop or compose */
++
++	return 0;
++}
++#endif
++
++static int s5k3l6xx_enum_frame_interval(struct v4l2_subdev *sd,
++				       struct v4l2_subdev_state *sd_state,
++				       struct v4l2_subdev_frame_interval_enum *fie)
++{
++	if (fie->index >= ARRAY_SIZE(supported_modes))
++		return -EINVAL;
++
++	fie->code = S5K3L6XX_MEDIA_BUS_FMT;
++
++	fie->width = supported_modes[fie->index].width;
++	fie->height = supported_modes[fie->index].height;
++	fie->interval = supported_modes[fie->index].max_fps;
++
++	return 0;
++}
++
++static int s5k3l6xx_g_mbus_config(struct v4l2_subdev *sd, unsigned int pad,
++				struct v4l2_mbus_config *config)
++{
++	config->type = V4L2_MBUS_CSI2_DPHY;
++	config->bus.mipi_csi2.num_data_lanes = S5K3L6XX_LANES;
++
++	return 0;
++}
++
++#define CROP_START(SRC, DST) (((SRC) - (DST)) / 2 / 4 * 4)
++#define DST_WIDTH_2096 2096
++#define DST_HEIGHT_1560 1560
++
++static int s5k3l6xx_get_selection(struct v4l2_subdev *sd,
++				struct v4l2_subdev_state *sd_state,
++				struct v4l2_subdev_selection *sel)
++{
++	struct s5k3l6xx *s5k3l6xx = to_s5k3l6xx(sd);
++
++	switch (sel->target) {
++	case V4L2_SEL_TGT_CROP:
++		if (sel->which == V4L2_SUBDEV_FORMAT_TRY) {
++				v4l2_subdev_state_get_crop(sd_state, sel->pad);
++		}
++		else if (sel->which == V4L2_SUBDEV_FORMAT_ACTIVE) {
++				sel->r.top = 0;
++				sel->r.left = 0;
++				sel->r.width = s5k3l6xx->cur_mode->width;
++				sel->r.height = s5k3l6xx->cur_mode->height;
++		}
++		return 0;
++	case V4L2_SEL_TGT_CROP_DEFAULT:
++	case V4L2_SEL_TGT_CROP_BOUNDS:
++	case V4L2_SEL_TGT_NATIVE_SIZE:
++		if (s5k3l6xx->cur_mode->width == 2104) {
++			sel->r.left = CROP_START(s5k3l6xx->cur_mode->width, DST_WIDTH_2096);
++			sel->r.width = DST_WIDTH_2096;
++			sel->r.top = CROP_START(s5k3l6xx->cur_mode->height, DST_HEIGHT_1560);
++			sel->r.height = DST_HEIGHT_1560;
++		} else {
++			sel->r.left = CROP_START(s5k3l6xx->cur_mode->width,
++							s5k3l6xx->cur_mode->width);
++			sel->r.width = s5k3l6xx->cur_mode->width;
++			sel->r.top = CROP_START(s5k3l6xx->cur_mode->height,
++							s5k3l6xx->cur_mode->height);
++			sel->r.height = s5k3l6xx->cur_mode->height;
++		}
++		return 0;
++	default:
++		return -EINVAL;
++	}
++}
++
++static const struct dev_pm_ops s5k3l6xx_pm_ops = {
++	SET_RUNTIME_PM_OPS(s5k3l6xx_runtime_suspend,
++			   s5k3l6xx_runtime_resume, NULL)
++};
++
++#ifdef CONFIG_VIDEO_V4L2_SUBDEV_API
++static const struct v4l2_subdev_internal_ops s5k3l6xx_internal_ops = {
++	.open = s5k3l6xx_open,
++};
++#endif
++
++static const struct v4l2_subdev_core_ops s5k3l6xx_core_ops = {
++	.s_power = s5k3l6xx_s_power,
++// 	.ioctl = s5k3l6xx_ioctl,
++// #ifdef CONFIG_COMPAT
++// 	.compat_ioctl32 = s5k3l6xx_compat_ioctl32,
++// #endif
++};
++
++static const struct v4l2_subdev_video_ops s5k3l6xx_video_ops = {
++	.s_stream = s5k3l6xx_s_stream,
++};
++
++static const struct v4l2_subdev_pad_ops s5k3l6xx_pad_ops = {
++	.enum_mbus_code = s5k3l6xx_enum_mbus_code,
++	.enum_frame_size = s5k3l6xx_enum_frame_sizes,
++	.enum_frame_interval = s5k3l6xx_enum_frame_interval,
++	.get_fmt = s5k3l6xx_get_fmt,
++	.set_fmt = s5k3l6xx_set_fmt,
++	.get_selection = s5k3l6xx_get_selection,
++	.get_mbus_config = s5k3l6xx_g_mbus_config,
++	.get_frame_interval = s5k3l6xx_g_frame_interval,
++};
++
++static const struct v4l2_subdev_ops s5k3l6xx_subdev_ops = {
++	.core	= &s5k3l6xx_core_ops,
++	.video	= &s5k3l6xx_video_ops,
++	.pad	= &s5k3l6xx_pad_ops,
++};
++
++static int s5k3l6xx_set_ctrl(struct v4l2_ctrl *ctrl)
++{
++	struct s5k3l6xx *s5k3l6xx = container_of(ctrl->handler,
++					     struct s5k3l6xx, ctrl_handler);
++	struct i2c_client *client = s5k3l6xx->client;
++	s64 max;
++	int ret = 0;
++
++	/* Propagate change of current control to all related controls */
++	switch (ctrl->id) {
++	case V4L2_CID_VBLANK:
++		/* Update max exposure while meeting expected vblanking */
++		max = s5k3l6xx->cur_mode->height + ctrl->val - 4;
++		__v4l2_ctrl_modify_range(s5k3l6xx->exposure,
++					 s5k3l6xx->exposure->minimum, max,
++					 s5k3l6xx->exposure->step,
++					 s5k3l6xx->exposure->default_value);
++		break;
++	}
++
++	if (!pm_runtime_get_if_in_use(&client->dev))
++		return 0;
++
++	switch (ctrl->id) {
++	case V4L2_CID_EXPOSURE:
++		/* 4 least significant bits of expsoure are fractional part */
++		ret = s5k3l6xx_write_reg(s5k3l6xx->client,
++					S5K3L6XX_REG_EXPOSURE,
++					S5K3L6XX_REG_VALUE_16BIT,
++					ctrl->val);
++		break;
++	case V4L2_CID_ANALOGUE_GAIN:
++		ret = s5k3l6xx_write_reg(s5k3l6xx->client,
++					S5K3L6XX_REG_ANALOG_GAIN,
++					S5K3L6XX_REG_VALUE_16BIT,
++					ctrl->val);
++		break;
++	case V4L2_CID_VBLANK:
++		ret = s5k3l6xx_write_reg(s5k3l6xx->client,
++					S5K3L6XX_REG_VTS,
++					S5K3L6XX_REG_VALUE_16BIT,
++					ctrl->val + s5k3l6xx->cur_mode->height);
++		break;
++	case V4L2_CID_TEST_PATTERN:
++		ret = s5k3l6xx_enable_test_pattern(s5k3l6xx, ctrl->val);
++		break;
++	default:
++		dev_warn(&client->dev, "%s Unhandled id:0x%x, val:0x%x\n",
++			 __func__, ctrl->id, ctrl->val);
++		break;
++	}
++
++	pm_runtime_put(&client->dev);
++
++	return ret;
++}
++
++static const struct v4l2_ctrl_ops s5k3l6xx_ctrl_ops = {
++	.s_ctrl = s5k3l6xx_set_ctrl,
++};
++
++static int s5k3l6xx_initialize_controls(struct s5k3l6xx *s5k3l6xx)
++{
++	const struct s5k3l6xx_mode *mode;
++	struct v4l2_ctrl_handler *handler;
++	struct i2c_client *client = v4l2_get_subdevdata(&s5k3l6xx->subdev);
++	struct v4l2_fwnode_device_properties props;
++	s64 exposure_max, vblank_def;
++	u32 h_blank;
++	int ret;
++	u64 dst_pixel_rate = 0;
++	u32 lane_num = S5K3L6XX_LANES;
++
++	handler = &s5k3l6xx->ctrl_handler;
++	mode = s5k3l6xx->cur_mode;
++	ret = v4l2_ctrl_handler_init(handler, 8);
++	if (ret)
++		return ret;
++	handler->lock = &s5k3l6xx->mutex;
++
++	s5k3l6xx->link_freq = v4l2_ctrl_new_int_menu(handler, NULL,
++			V4L2_CID_LINK_FREQ,
++			1, 0, link_freq_items);
++
++	dst_pixel_rate = (u32)link_freq_items[mode->link_freq_idx] / mode->bpp * 2 * lane_num;
++
++	s5k3l6xx->pixel_rate = v4l2_ctrl_new_std(handler, NULL,
++			V4L2_CID_PIXEL_RATE,
++			0, S5K3L6XX_PIXEL_RATE,
++			1, dst_pixel_rate);
++
++	__v4l2_ctrl_s_ctrl(s5k3l6xx->link_freq,
++			   mode->link_freq_idx);
++
++	h_blank = mode->hts_def - mode->width;
++	s5k3l6xx->hblank = v4l2_ctrl_new_std(handler, NULL, V4L2_CID_HBLANK,
++				h_blank, h_blank, 1, h_blank);
++	if (s5k3l6xx->hblank)
++		s5k3l6xx->hblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	vblank_def = mode->vts_def - mode->height;
++	s5k3l6xx->vblank = v4l2_ctrl_new_std(handler, &s5k3l6xx_ctrl_ops,
++				V4L2_CID_VBLANK, vblank_def,
++				S5K3L6XX_VTS_MAX - mode->height,
++				1, vblank_def);
++
++	exposure_max = mode->vts_def - 4;
++	s5k3l6xx->exposure = v4l2_ctrl_new_std(handler, &s5k3l6xx_ctrl_ops,
++				V4L2_CID_EXPOSURE, S5K3L6XX_EXPOSURE_MIN,
++				exposure_max, S5K3L6XX_EXPOSURE_STEP,
++				mode->exp_def);
++
++	s5k3l6xx->anal_gain = v4l2_ctrl_new_std(handler, &s5k3l6xx_ctrl_ops,
++				V4L2_CID_ANALOGUE_GAIN, S5K3L6XX_GAIN_MIN,
++				S5K3L6XX_GAIN_MAX, S5K3L6XX_GAIN_STEP,
++				S5K3L6XX_GAIN_DEFAULT);
++
++	s5k3l6xx->test_pattern = v4l2_ctrl_new_std_menu_items(handler,
++				&s5k3l6xx_ctrl_ops, V4L2_CID_TEST_PATTERN,
++				ARRAY_SIZE(s5k3l6xx_test_pattern_menu) - 1,
++				0, 0, s5k3l6xx_test_pattern_menu);
++
++	if (handler->error) {
++		ret = handler->error;
++		dev_err(&s5k3l6xx->client->dev,
++			"Failed to init controls(%d)\n", ret);
++		goto err_free_handler;
++	}
++
++	ret = v4l2_fwnode_device_parse(&client->dev, &props);
++	if (ret)
++		return ret;
++
++	ret = v4l2_ctrl_new_fwnode_properties(handler, &s5k3l6xx_ctrl_ops, &props);
++	if (ret)
++		return ret;
++
++	s5k3l6xx->subdev.ctrl_handler = handler;
++
++	return 0;
++
++err_free_handler:
++	v4l2_ctrl_handler_free(handler);
++
++	return ret;
++}
++
++static int s5k3l6xx_check_sensor_id(struct s5k3l6xx *s5k3l6xx,
++				   struct i2c_client *client)
++{
++	struct device *dev = &s5k3l6xx->client->dev;
++	u32 id = 0;
++	int ret;
++
++	ret = s5k3l6xx_read_reg(client, S5K3L6XX_REG_CHIP_ID,
++			       S5K3L6XX_REG_VALUE_16BIT, &id);
++	if (id != CHIP_ID) {
++		dev_err(dev, "Unexpected sensor id(%04x), ret(%d)\n", id, ret);
++		return -ENODEV;
++	}
++
++	ret = s5k3l6xx_read_reg(client, S5K3L6XX_CHIP_REVISION_REG,
++			       S5K3L6XX_REG_VALUE_08BIT, &id);
++	if (ret) {
++		dev_err(dev, "Read chip revision register error\n");
++		return ret;
++	}
++
++	dev_info(dev, "Detected Samsung %04x sensor, REVISION 0x%x\n", CHIP_ID, id);
++
++	return 0;
++}
++
++static int s5k3l6xx_configure_regulators(struct s5k3l6xx *s5k3l6xx)
++{
++	unsigned int i;
++
++	for (i = 0; i < S5K3L6XX_NUM_SUPPLIES; i++)
++		s5k3l6xx->supplies[i].supply = s5k3l6xx_supply_names[i];
++
++	return devm_regulator_bulk_get(&s5k3l6xx->client->dev,
++				       S5K3L6XX_NUM_SUPPLIES,
++				       s5k3l6xx->supplies);
++}
++
++static int s5k3l6xx_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	// struct device_node *node = dev->of_node;
++	struct s5k3l6xx *s5k3l6xx;
++	struct v4l2_subdev *sd;
++	// char facing[2];
++	int ret;
++
++	dev_info(dev, "driver version: %02x.%02x.%02x",
++		DRIVER_VERSION >> 16,
++		(DRIVER_VERSION & 0xff00) >> 8,
++		DRIVER_VERSION & 0x00ff);
++
++	s5k3l6xx = devm_kzalloc(dev, sizeof(*s5k3l6xx), GFP_KERNEL);
++	if (!s5k3l6xx)
++		return -ENOMEM;
++
++	// ret = of_property_read_u32(node, RKMODULE_CAMERA_MODULE_INDEX,
++	// 			   &s5k3l6xx->module_index);
++	// ret |= of_property_read_string(node, RKMODULE_CAMERA_MODULE_FACING,
++	// 			       &s5k3l6xx->module_facing);
++	// ret |= of_property_read_string(node, RKMODULE_CAMERA_MODULE_NAME,
++	// 			       &s5k3l6xx->module_name);
++	// ret |= of_property_read_string(node, RKMODULE_CAMERA_LENS_NAME,
++	// 			       &s5k3l6xx->len_name);
++	// if (ret) {
++	// 	dev_err(dev, "could not get module information!\n");
++	// 	return -EINVAL;
++	// }
++
++	s5k3l6xx->client = client;
++	s5k3l6xx->cur_mode = &supported_modes[0];
++
++	s5k3l6xx->xvclk = devm_clk_get(dev, "xvclk");
++	if (IS_ERR(s5k3l6xx->xvclk)) {
++		dev_err(dev, "Failed to get xvclk\n");
++		return -EINVAL;
++	}
++
++	// s5k3l6xx->power_gpio = devm_gpiod_get(dev, "power", GPIOD_OUT_LOW);
++	// if (IS_ERR(s5k3l6xx->power_gpio))
++	// 	dev_warn(dev, "Failed to get power-gpios, maybe no use\n");
++
++	s5k3l6xx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
++	if (IS_ERR(s5k3l6xx->reset_gpio))
++		dev_warn(dev, "Failed to get reset-gpios\n");
++
++	// s5k3l6xx->pwdn_gpio = devm_gpiod_get(dev, "pwdn", GPIOD_OUT_LOW);
++	// if (IS_ERR(s5k3l6xx->pwdn_gpio))
++	// 	dev_warn(dev, "Failed to get pwdn-gpios\n");
++
++	ret = s5k3l6xx_configure_regulators(s5k3l6xx);
++	if (ret) {
++		dev_err(dev, "Failed to get power regulators\n");
++		return ret;
++	}
++
++	// s5k3l6xx->pinctrl = devm_pinctrl_get(dev);
++	// if (!IS_ERR(s5k3l6xx->pinctrl)) {
++	// 	s5k3l6xx->pins_default =
++	// 		pinctrl_lookup_state(s5k3l6xx->pinctrl,
++	// 				     OF_CAMERA_PINCTRL_STATE_DEFAULT);
++	// 	if (IS_ERR(s5k3l6xx->pins_default))
++	// 		dev_err(dev, "could not get default pinstate\n");
++
++	// 	s5k3l6xx->pins_sleep =
++	// 		pinctrl_lookup_state(s5k3l6xx->pinctrl,
++	// 				     OF_CAMERA_PINCTRL_STATE_SLEEP);
++	// 	if (IS_ERR(s5k3l6xx->pins_sleep))
++	// 		dev_err(dev, "could not get sleep pinstate\n");
++	// }
++
++	mutex_init(&s5k3l6xx->mutex);
++
++	sd = &s5k3l6xx->subdev;
++	v4l2_i2c_subdev_init(sd, client, &s5k3l6xx_subdev_ops);
++	ret = s5k3l6xx_initialize_controls(s5k3l6xx);
++	if (ret)
++		goto err_destroy_mutex;
++
++	ret = __s5k3l6xx_power_on(s5k3l6xx);
++	if (ret)
++		goto err_free_handler;
++
++	ret = s5k3l6xx_check_sensor_id(s5k3l6xx, client);
++	if (ret)
++		goto err_power_off;
++
++#ifdef CONFIG_VIDEO_V4L2_SUBDEV_API
++	sd->internal_ops = &s5k3l6xx_internal_ops;
++	sd->flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
++#endif
++#if defined(CONFIG_MEDIA_CONTROLLER)
++	s5k3l6xx->pad.flags = MEDIA_PAD_FL_SOURCE;
++	sd->entity.function = MEDIA_ENT_F_CAM_SENSOR;
++	ret = media_entity_pads_init(&sd->entity, 1, &s5k3l6xx->pad);
++	if (ret < 0)
++		goto err_power_off;
++#endif
++
++	// memset(facing, 0, sizeof(facing));
++	// if (strcmp(s5k3l6xx->module_facing, "back") == 0)
++	// 	facing[0] = 'b';
++	// else
++	// 	facing[0] = 'f';
++
++	// snprintf(sd->name, sizeof(sd->name), "m%02d_%s_%s %s",
++	// 	 s5k3l6xx->module_index, facing,
++	// 	 S5K3L6XX_NAME, dev_name(sd->dev));
++	ret = v4l2_async_register_subdev_sensor(sd);
++	if (ret) {
++		dev_err(dev, "v4l2 async register subdev failed\n");
++		goto err_clean_entity;
++	}
++
++	pm_runtime_set_active(dev);
++	pm_runtime_enable(dev);
++	pm_runtime_idle(dev);
++
++	return 0;
++
++err_clean_entity:
++#if defined(CONFIG_MEDIA_CONTROLLER)
++	media_entity_cleanup(&sd->entity);
++#endif
++err_power_off:
++	__s5k3l6xx_power_off(s5k3l6xx);
++err_free_handler:
++	v4l2_ctrl_handler_free(&s5k3l6xx->ctrl_handler);
++err_destroy_mutex:
++	mutex_destroy(&s5k3l6xx->mutex);
++
++	return ret;
++}
++
++static void s5k3l6xx_remove(struct i2c_client *client)
++{
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct s5k3l6xx *s5k3l6xx = to_s5k3l6xx(sd);
++
++	v4l2_async_unregister_subdev(sd);
++#if defined(CONFIG_MEDIA_CONTROLLER)
++	media_entity_cleanup(&sd->entity);
++#endif
++	v4l2_ctrl_handler_free(&s5k3l6xx->ctrl_handler);
++	mutex_destroy(&s5k3l6xx->mutex);
++
++	pm_runtime_disable(&client->dev);
++	if (!pm_runtime_status_suspended(&client->dev))
++		__s5k3l6xx_power_off(s5k3l6xx);
++	pm_runtime_set_suspended(&client->dev);
++}
++
++#if IS_ENABLED(CONFIG_OF)
++static const struct of_device_id s5k3l6xx_of_match[] = {
++	{ .compatible = "samsung,s5k3l6" },
++	{},
++};
++MODULE_DEVICE_TABLE(of, s5k3l6xx_of_match);
++#endif
++
++static const struct i2c_device_id s5k3l6xx_match_id[] = {
++	{ "samsung,s5k3l6xx", 0 },
++	{},
++};
++
++static struct i2c_driver s5k3l6xx_i2c_driver = {
++	.driver = {
++		.name = S5K3L6XX_NAME,
++		.pm = &s5k3l6xx_pm_ops,
++		.of_match_table = of_match_ptr(s5k3l6xx_of_match),
++	},
++	.probe		= &s5k3l6xx_probe,
++	.remove		= &s5k3l6xx_remove,
++	.id_table	= s5k3l6xx_match_id,
++};
++
++static int __init sensor_mod_init(void)
++{
++	return i2c_add_driver(&s5k3l6xx_i2c_driver);
++}
++
++static void __exit sensor_mod_exit(void)
++{
++	i2c_del_driver(&s5k3l6xx_i2c_driver);
++}
++
++device_initcall_sync(sensor_mod_init);
++module_exit(sensor_mod_exit);
++
++MODULE_DESCRIPTION("Samsung s5k3l6xx sensor driver");
++MODULE_LICENSE("GPL v2");
+diff -Naur linux/drivers/media/i2c/s5k3l6xx.c orig-linux-sdm845-6.16-dev/drivers/media/i2c/s5k3l6xx.c
+--- linux/drivers/media/i2c/s5k3l6xx.c	1970-01-01 08:00:00.000000000 +0800
++++ orig-linux-sdm845-6.16-dev/drivers/media/i2c/s5k3l6xx.c	2024-08-12 14:00:21.178388800 +0800
+@@ -0,0 +1,1586 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Driver for Samsung S5K3L6XX 1/3" 13M CMOS Image Sensor.
++ *
++ * Copyright (C) 2020-2021 Purism SPC
++ *
++ * Based on S5K5BAF driver
++ * Copyright (C) 2013, Samsung Electronics Co., Ltd.
++ * Andrzej Hajda <a.hajda@samsung.com>
++ *
++ * Based on S5K6AA driver authored by Sylwester Nawrocki
++ * Copyright (C) 2013, Samsung Electronics Co., Ltd.
++ */
++
++#include <linux/clk.h>
++#include <linux/debugfs.h>
++#include <linux/delay.h>
++#include <linux/firmware.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/media.h>
++#include <linux/module.h>
++#include <linux/of_graph.h>
++#include <linux/regulator/consumer.h>
++#include <linux/pm_runtime.h>
++#include <linux/pm.h>
++#include <linux/slab.h>
++
++#include <media/media-entity.h>
++#include <media/v4l2-ctrls.h>
++#include <media/v4l2-device.h>
++#include <media/v4l2-subdev.h>
++#include <media/v4l2-mediabus.h>
++#include <media/v4l2-fwnode.h>
++
++static int debug;
++module_param(debug, int, 0644);
++
++#define S5K3L6XX_DRIVER_NAME		"s5k3l6xx"
++#define S5K3L6XX_DEFAULT_MCLK_FREQ	24000000U
++#define S5K3L6XX_CLK_NAME		"mclk"
++
++#define S5K3L6XX_REG_MODEL_ID_L		0x0000
++#define S5K3L6XX_REG_MODEL_ID_H		0x0001
++#define S5K3L6XX_MODEL_ID_L		0x30
++#define S5K3L6XX_MODEL_ID_H		0xc6
++
++#define S5K3L6XX_REG_REVISION_NUMBER	0x0002
++#define S5K3L6XX_REVISION_NUMBER	0xb0
++
++#define S5K3L6XX_REG_FRAME_COUNT	0x0005
++#define S5K3L6XX_REG_LANE_MODE		0x0114
++#define S5K3L6XX_REG_FINE_INTEGRATION_TIME		0x0200 // 2 bytes
++#define S5K3L6XX_REG_COARSE_INTEGRATION_TIME		0x0202 // 2 bytes
++#define S5K3L6XX_REG_ANALOG_GAIN		0x0204 // 2 bytes
++#define S5K3L6XX_REG_DIGITAL_GAIN		0x020e // 2 bytes
++
++#define S5K3L6XX_REG_TEST_PATTERN_MODE	0x0601
++#define S5K3L6XX_TEST_PATTERN_SOLID_COLOR	0x01
++#define S5K3L6XX_TEST_PATTERN_COLOR_BAR	0x02
++
++#define S5K3L6XX_REG_TEST_DATA_RED	0x0602
++#define S5K3L6XX_REG_TEST_DATA_GREENR	0x0604
++#define S5K3L6XX_REG_TEST_DATA_BLUE	0x0606
++#define S5K3L6XX_REG_TEST_DATA_GREENB	0x0608
++
++#define S5K3L6XX_REG_AF			0x3403
++#define S5K3L6XX_REG_AF_BIT_FILTER	0b100
++
++#define S5K3L6XX_REG_PLL_PD		0x3c1e
++
++#define S5K3L6XX_REG_MODE_SELECT	0x100
++#define S5K3L6XX_MODE_STREAMING		0x1
++#define S5K3L6XX_MODE_STANDBY		0x0
++
++#define S5K3L6XX_REG_DATA_FORMAT	0x0112
++#define S5K3L6XX_DATA_FORMAT_RAW8	0x0808
++
++#define S5K3L6XX_CIS_WIDTH		4208
++#define S5K3L6XX_CIS_HEIGHT		3120
++
++
++static const char * const s5k3l6xx_supply_names[] = {
++	"vddio", /* Digital I/O (1.8V or 2.8V) */
++	"vdda", /* Analog (2.8V) */
++	"vddd", /* Digital Core (1.05V expected) */
++};
++
++#define S5K3L6XX_NUM_SUPPLIES ARRAY_SIZE(s5k3l6xx_supply_names)
++
++
++struct s5k3l6xx_reg {
++	u16 address;
++	u16 val;
++	// Size of a single write.
++	u8 size;
++};
++
++// Downscaled 1:4 in both directions.
++// Spans the entire sensor. Fps unknown.
++// Relies on defaults to be set correctly.
++static const struct s5k3l6xx_reg frame_1052x780px_8bit_xfps_2lane[] = {
++	// extclk freq 25MHz (doesn't seem to matter)
++	// FIXME: this is mclk, and should be set accordingly
++	{ 0x0136, 0x1900,       2 },
++
++	// x_output_size
++	{ 0x034c, 0x041c,       2 },
++	// line length in pixel clocks. at least x_output_size * 1.16
++	// if using binning multiply x_output_size by the binning factor first
++	{ 0x0342, 0x1980,       2 },
++	// y_output_size
++	{ 0x034e, 0x030c,       2 },
++
++	// op_pll_multiplier, default 0064
++	{ 0x030e, 0x0036,       2 },
++
++	// y_addr_start
++	{ 0x0346, 0x0000,       2 },
++	// end = y_output_size * binning_factor + y_addr_start
++	{ 0x034a, 0x0c30,       2 },
++	// x_addr_start
++	{ 0x0344, 0x0008,       2 },
++	// end = x_output_size * binning_factor + x_addr_start - 1
++	{ 0x0348, 0x1077,       2 },
++
++	// binning enable
++	{ 0x0900, 0x01, 1 },
++	// type: 1/?x, 1/?y, full binning when matching skips
++	{ 0x0901, 0x44, 1 },
++	// y_odd_inc
++	{ 0x0387, 0x07, 1 },
++
++	// Noise reduction
++	// The last 3 bits (0x0007) control some global brightness/noise pattern.
++	// They work slightly differently depending on the value of 307b:80
++	// Lower values seem to make analog gain behave in a non-linear way.
++	{ 0x3074, 0x0977, 2},
++};
++
++// Downscaled 1:2 in both directions.
++// Spans the entire sensor. Fps unknown.
++// Relies on defaults to be set correctly.
++static const struct s5k3l6xx_reg frame_2104x1560px_8bit_xfps_2lane[] = {
++	// extclk freq 25MHz (doesn't seem to matter)
++	{ 0x0136, 0x1900,       2 },
++
++	// x_output_size
++	{ 0x034c, 0x0838,       2 },
++	// y_output_size
++	{ 0x034e, 0x0618,       2 },
++	// op_pll_multiplier, default 0064
++	// 0036 is ok when 175MHz selected on mipi side (IMX8MQ_CLK_CSI2_PHY_REF), although it makes the source clock 216MHz (double-check)
++	// 0042 ok for 200MHz
++	// 0052 ok for 250MHz
++	{ 0x030e, 0x0053,       2 },
++
++	// y_addr_start
++	{ 0x0346, 0x0000,       2 },
++	// end
++	{ 0x034a, 0x0c30,       2 },
++	// x_addr_start
++	{ 0x0344, 0x0000,       2 },
++	// end to match sensor
++	{ 0x0348, 0x1068,       2 },
++
++	// binning in 1:2 mode seems to average out focus pixels.
++	// binning enable
++	{ 0x0900, 0x01, 1 },
++	// type: 1/?x, 1/?y, full binning when matching skips
++	{ 0x0901, 0x22, 1 },
++	// x binning skips 8-pixel bocks, making it useless
++	// y_odd_inc
++	{ 0x0387, 0x03, 1 },
++
++	// Noise reduction
++	// The last 3 bits (0x0007) control some global brightness/noise pattern.
++	// They work slightly differently depending on the value of 307b:80
++	// 0x0972 makes focus pixels appear.
++	// Lower values seem to make analog gain behave in a non-linear way.
++	{ 0x3074, 0x0977, 2}, // 74, 75, 76, 77 all good for binning 1:2.
++
++	// filter out autofocus pixels
++	// FIXME: this should be behind a custom control instead
++	{ 0x3403, 0x42 | S5K3L6XX_REG_AF_BIT_FILTER, 1 },
++};
++
++// Not scaled.
++// Spans the entire sensor. Fps unknown.
++// Relies on defaults to be set correctly.
++static const struct s5k3l6xx_reg frame_4208x3120px_8bit_xfps_2lane[] = {
++	// extclk freq (doesn't actually matter)
++	{ 0x0136, 0x1900,       2 },
++
++	// x_output_size
++	{ 0x034c, 0x1070,       2 },
++	// y_output_size
++	{ 0x034e, 0x0c30,       2 },
++	// op_pll_multiplier, default 0064
++	// 0036 is good (max) when 175MHz selected on mipi side, although it makes the source clock 216MHz (double-check)
++	// 0042 ok for 200MHz
++	// 0052 ok for 250MHz
++	// 006c for 333Mhz
++	{ 0x030e, 0x006c,       2 },
++
++	// y_addr_start
++	{ 0x0346, 0x0000,       2 },
++	// end
++	{ 0x034a, 0x0c30,       2 },
++	// x_addr_start
++	{ 0x0344, 0x0000,       2 },
++	// end to match sensor
++	{ 0x0348, 0x1068,       2 },
++	// line length in pixel clocks
++	{ 0x0342, 0x1980,       2 },
++
++	// Noise reduction
++	// The last 3 bits (0x0007) control some global brightness/noise pattern.
++	// They work slightly differently depending on the value of 307b:80
++	{ 0x3074, 0x0977, 2}, // 74, 75, 76, 77 all good for binning 1:!, might introduce banding.
++
++	// filter out autofocus pixels
++	// FIXME: this should be behind a custom control instead
++	{ 0x3403, 0x42 | S5K3L6XX_REG_AF_BIT_FILTER, 1 },
++};
++
++#define PAD_CIS 0
++#define NUM_CIS_PADS 1
++#define NUM_ISP_PADS 1
++
++
++struct s5k3l6xx_frame {
++	char *name;
++	u32 width;
++	u32 height;
++	u32 code; // Media bus code
++	const struct s5k3l6xx_reg  *streamregs;
++	u16 streamregcount;
++	u32 mipi_multiplier; // MIPI clock multiplier coming from PLL config, before multiplying by ext_clock
++};
++
++struct s5k3l6xx_ctrls {
++	struct v4l2_ctrl_handler handler;
++	struct { /* Auto / manual white balance cluster */
++		struct v4l2_ctrl *awb;
++		struct v4l2_ctrl *gain_red;
++		struct v4l2_ctrl *gain_blue;
++	};
++	struct { /* Mirror cluster */
++		struct v4l2_ctrl *hflip;
++		struct v4l2_ctrl *vflip;
++	};
++	struct { /* Auto exposure / manual exposure and gain cluster */
++		struct v4l2_ctrl *auto_exp;
++		struct v4l2_ctrl *exposure;
++		struct v4l2_ctrl *analog_gain;
++		struct v4l2_ctrl *digital_gain;
++	};
++	struct { /* Link properties */
++		struct v4l2_ctrl *link_freq;
++		struct v4l2_ctrl *pixel_rate;
++	};
++	struct { /* Frame properties */
++		struct v4l2_ctrl *hblank;
++		struct v4l2_ctrl *vblank;
++	};
++};
++
++struct regstable_entry {
++	u16 address;
++	u8 value;
++};
++
++#define REGSTABLE_SIZE 4096
++
++struct regstable {
++	unsigned entry_count;
++	struct regstable_entry entries[REGSTABLE_SIZE];
++};
++
++struct s5k3l6xx {
++	struct gpio_desc *rst_gpio;
++	struct regulator_bulk_data supplies[S5K3L6XX_NUM_SUPPLIES];
++	enum v4l2_mbus_type bus_type;
++	u8 nlanes;
++
++	struct clk *clock;
++	u32 mclk_frequency;
++
++	struct v4l2_subdev cis_sd;
++	struct media_pad cis_pad;
++
++	struct v4l2_subdev sd;
++
++	/* protects the struct members below */
++	struct mutex lock;
++
++	int error;
++
++	/* Currently selected frame format */
++	const struct s5k3l6xx_frame *frame_fmt;
++
++	struct s5k3l6xx_ctrls ctrls;
++
++	/* Solid color test pattern is in effect,
++	 * write needs to happen after color choice writes.
++	 * It doesn't seem that controls guarantee any order of application. */
++	unsigned int apply_test_solid:1;
++
++	unsigned int streaming:1;
++	unsigned int apply_cfg:1;
++	unsigned int apply_crop:1;
++	unsigned int valid_auto_alg:1;
++	unsigned int power;
++
++	u8 debug_frame; // Enables any size, sets empty debug frame.
++	/* For debug address temporary value */
++	u16 debug_address;
++	struct regstable debug_regs;
++};
++
++static const struct s5k3l6xx_reg no_regs[0] = {};
++
++static const struct s5k3l6xx_frame s5k3l6xx_frame_debug = {
++	.name = "debug_empty",
++	.width = 640, .height = 480,
++	.streamregs = no_regs,
++	.streamregcount = 0,
++	.code = MEDIA_BUS_FMT_SGRBG8_1X8,
++};
++
++// Frame sizes are only available in RAW, so this effectively replaces pixfmt.
++// Supported frame configurations.
++static const struct s5k3l6xx_frame s5k3l6xx_frames[] = {
++	{
++		.name = "1:4 8bpp ?fps",
++		.width = 1052, .height = 780,
++		.streamregs = frame_1052x780px_8bit_xfps_2lane,
++		.streamregcount = ARRAY_SIZE(frame_1052x780px_8bit_xfps_2lane),
++
++		.code = MEDIA_BUS_FMT_SGRBG8_1X8,
++		.mipi_multiplier = 0x36 / 4,
++	},
++	{
++		.name = "1:2 8bpp +fps",
++		.width = 2104, .height = 1560,
++		.streamregs = frame_2104x1560px_8bit_xfps_2lane,
++		.streamregcount = ARRAY_SIZE(frame_2104x1560px_8bit_xfps_2lane),
++		.code = MEDIA_BUS_FMT_SGRBG8_1X8,
++		.mipi_multiplier = 0x53 / 4,
++	},
++	{
++		.name = "1:1 8bpp ?fps",
++		.width = 4208, .height = 3120,
++		.streamregs = frame_4208x3120px_8bit_xfps_2lane,
++		.streamregcount = ARRAY_SIZE(frame_4208x3120px_8bit_xfps_2lane),
++		.code = MEDIA_BUS_FMT_SGRBG8_1X8,
++		.mipi_multiplier = 0x33 / 4,
++	},
++};
++
++static inline struct v4l2_subdev *ctrl_to_sd(struct v4l2_ctrl *ctrl)
++{
++	return &container_of(ctrl->handler, struct s5k3l6xx, ctrls.handler)->sd;
++}
++
++static inline bool s5k5baf_is_cis_subdev(struct v4l2_subdev *sd)
++{
++	return sd->entity.function == MEDIA_ENT_F_CAM_SENSOR;
++}
++
++static inline struct s5k3l6xx *to_s5k3l6xx(struct v4l2_subdev *sd)
++{
++	return container_of(sd, struct s5k3l6xx, sd);
++}
++
++struct s5k3l6xx_read_result {
++	u8 value;
++	int retcode;
++};
++
++static struct s5k3l6xx_read_result __s5k3l6xx_i2c_read(struct s5k3l6xx *state, u16 addr)
++{
++	struct i2c_client *c = v4l2_get_subdevdata(&state->sd);
++	__be16 w;
++	struct s5k3l6xx_read_result ret;
++	struct i2c_msg msg[] = {
++		{ .addr = c->addr, .flags = 0,
++		  .len = 2, .buf = (u8 *)&w },
++		{ .addr = c->addr, .flags = I2C_M_RD,
++		  .len = 1, .buf = (u8 *)&ret.value },
++	};
++	w = cpu_to_be16(addr);
++	ret.retcode = i2c_transfer(c->adapter, msg, 2);
++
++	if (ret.retcode != 2) {
++		v4l2_err(c, "i2c_read: error during transfer (%d)\n", ret.retcode);
++	}
++	return ret;
++}
++
++static struct s5k3l6xx_read_result s5k3l6xx_i2c_read(struct s5k3l6xx *state, u16 addr)
++{
++	struct i2c_client *c = v4l2_get_subdevdata(&state->sd);
++	struct s5k3l6xx_read_result ret;
++	ret = __s5k3l6xx_i2c_read(state, addr);
++	v4l2_dbg(3, debug, c, "i2c_read: 0x%04x : 0x%02x\n", addr, ret.value);
++	return ret;
++}
++
++static int s5k3l6xx_i2c_write(struct s5k3l6xx *state, u16 addr, u8 val)
++{
++	struct i2c_client *c = v4l2_get_subdevdata(&state->sd);
++	u8 buf[3] = { addr >> 8, addr & 0xFF, val };
++
++	struct i2c_msg msg[] = {
++		{ .addr = c->addr, .flags = 0,
++		  .len = 3, .buf = buf },
++	};
++	int ret;
++	int actual;
++
++	v4l2_dbg(3, debug, c, "i2c_write to 0x%04x : 0x%02x\n", addr, val);
++
++	ret = i2c_transfer(c->adapter, msg, 1);
++
++	if (ret != 1) {
++		v4l2_err(c, "i2c_write: error during transfer (%d)\n", ret);
++		return ret;
++	}
++	// Not sure if actually needed. So really debugging code at the moment.
++	actual = s5k3l6xx_i2c_read(state, addr).value;
++	if (actual != val)
++		v4l2_err(c, "i2c_write: value didn't stick. 0x%04x = 0x%02x != 0x%02x", addr, actual, val);
++	return 0;
++}
++
++static int s5k3l6xx_i2c_write2(struct s5k3l6xx *state, u16 addr, u16 val)
++{
++	struct i2c_client *c = v4l2_get_subdevdata(&state->sd);
++	u8 buf[4] = { addr >> 8, addr & 0xFF, (val >> 8) & 0xff, val & 0xff };
++
++	struct i2c_msg msg[] = {
++		{ .addr = c->addr, .flags = 0,
++		  .len = 4, .buf = buf },
++	};
++	int ret;
++
++	v4l2_dbg(3, debug, c, "i2c_write to 0x%04x : 0x%04x\n", addr, val);
++
++	ret = i2c_transfer(c->adapter, msg, 1);
++
++	// 1 message expected
++	if (ret != 1) {
++		v4l2_err(c, "i2c_write: error during transfer (%d)\n", ret);
++		return ret;
++	}
++	return 0;
++}
++
++static int s5k3l6xx_submit_regs(struct s5k3l6xx *state, const struct s5k3l6xx_reg *regs, u16 regcount) {
++       unsigned i;
++       int ret = 0;
++       for (i = 0; i < regcount; i++) {
++	       if (regs[i].size == 2)
++		       ret = s5k3l6xx_i2c_write2(state, regs[i].address, regs[i].val);
++	       else
++		       ret = s5k3l6xx_i2c_write(state, regs[i].address, (u8)regs[i].val);
++	       if (ret < 0)
++		       break;
++       }
++       return ret;
++}
++
++static struct s5k3l6xx_read_result s5k3l6xx_read(struct s5k3l6xx *state, u16 addr)
++{
++	return s5k3l6xx_i2c_read(state, addr);
++}
++
++static int s5k3l6xx_write(struct s5k3l6xx *state, u16 addr, u8 val)
++{
++	return s5k3l6xx_i2c_write(state, addr, val);
++}
++
++static int s5k3l6xx_submit_regstable(struct s5k3l6xx *state, const struct regstable *regs)
++{
++	struct i2c_client *c = v4l2_get_subdevdata(&state->sd);
++	unsigned i;
++	int ret = 0;
++
++	for (i = 0; i < regs->entry_count; i++) {
++		u16 addr = regs->entries[i].address;
++		u8 val = regs->entries[i].value;
++		if (debug >= 5) {
++			struct s5k3l6xx_read_result res = __s5k3l6xx_i2c_read(state, addr);
++			if (res.retcode >= 0 && res.value != val) {
++				v4l2_dbg(5, debug, c, "overwriting: 0x%04x : 0x%02x\n", addr, res.value);
++			}
++		}
++		ret = s5k3l6xx_i2c_write(state, addr, val);
++		if (ret < 0)
++			break;
++	}
++	return ret;
++}
++
++static int s5k3l6xx_find_pixfmt(const struct v4l2_mbus_framefmt *mf)
++{
++	int i, c = -1;
++
++	for (i = 0; i < ARRAY_SIZE(s5k3l6xx_frames); i++) {
++		if ((mf->colorspace != V4L2_COLORSPACE_DEFAULT)
++				&& (mf->colorspace != V4L2_COLORSPACE_RAW))
++			continue;
++		if ((mf->width != s5k3l6xx_frames[i].width) || (mf->height != s5k3l6xx_frames[i].height))
++			continue;
++		if (mf->code == s5k3l6xx_frames[i].code)
++			return i;
++	}
++	return c;
++}
++
++static const struct s5k3l6xx_reg setstream[] = {
++	{ S5K3L6XX_REG_DATA_FORMAT, S5K3L6XX_DATA_FORMAT_RAW8, 2 },
++	// Noise reduction
++	// Bit 0x0080 will create noise when off (by default)
++	// Raises data pedestal to 15-16.
++	{ 0x307a, 0x0d00, 2 },
++};
++
++static int s5k3l6xx_hw_set_config(struct s5k3l6xx *state) {
++	const struct s5k3l6xx_frame *frame_fmt = state->frame_fmt;
++	int ret;
++	v4l2_dbg(3, debug, &state->sd, "Setting frame format %s", frame_fmt->name);
++	ret = s5k3l6xx_submit_regs(state, frame_fmt->streamregs, frame_fmt->streamregcount);
++	if (ret < 0)
++		return ret;
++
++	// This may mess up PLL settings...
++	// If the above already enabled streaming (setfile A), we're also in trouble.
++	ret = s5k3l6xx_submit_regs(state, setstream, ARRAY_SIZE(setstream));
++	if (ret < 0)
++		return ret;
++
++	ret = s5k3l6xx_write(state, S5K3L6XX_REG_LANE_MODE, state->nlanes - 1);
++	if (ret < 0)
++		return ret;
++
++	return s5k3l6xx_submit_regstable(state, &state->debug_regs);
++}
++
++static int s5k3l6xx_hw_set_test_pattern(struct s5k3l6xx *state, int id)
++{
++	return s5k3l6xx_write(state, S5K3L6XX_REG_TEST_PATTERN_MODE, (u8)id);
++}
++
++static int s5k3l6xx_power_on(struct s5k3l6xx *state)
++{
++	int ret;
++
++	v4l2_dbg(1, debug, &state->sd, "power_ON\n");
++
++	ret = regulator_bulk_enable(S5K3L6XX_NUM_SUPPLIES, state->supplies);
++	if (ret < 0)
++		goto err;
++
++	usleep_range(10, 20);
++
++	ret = clk_set_rate(state->clock, state->mclk_frequency);
++	if (ret < 0)
++		goto err_reg_dis;
++
++	ret = clk_prepare_enable(state->clock);
++	if (ret < 0)
++		goto err_reg_dis;
++
++	v4l2_dbg(1, debug, &state->sd, "ON. clock frequency: %ld\n",
++		 clk_get_rate(state->clock));
++
++	/* 1ms = 25000 cycles at 25MHz */
++	usleep_range(1000, 1500);
++	gpiod_set_value_cansleep(state->rst_gpio, 0);
++
++	/*
++	 * this additional reset-active is not documented but makes power-on
++	 * more stable.
++	 */
++	usleep_range(400, 800);
++	gpiod_set_value_cansleep(state->rst_gpio, 1);
++	usleep_range(400, 800);
++	gpiod_set_value_cansleep(state->rst_gpio, 0);
++
++	/* t4+t5 delays (depending on coarse integration time) + safety margin */
++	msleep(10);
++
++	return 0;
++
++err_reg_dis:
++	regulator_bulk_disable(S5K3L6XX_NUM_SUPPLIES, state->supplies);
++err:
++	v4l2_err(&state->sd, "%s() failed (%d)\n", __func__, ret);
++	return ret;
++}
++
++static int s5k3l6xx_power_off(struct s5k3l6xx *state)
++{
++	int ret;
++
++	v4l2_dbg(1, debug, &state->sd, "power_OFF\n");
++
++	state->apply_cfg = 0;
++	state->apply_crop = 0;
++
++	usleep_range(20, 40);
++
++	gpiod_set_value_cansleep(state->rst_gpio, 1);
++
++	if (!IS_ERR(state->clock))
++		clk_disable_unprepare(state->clock);
++
++	ret = regulator_bulk_disable(S5K3L6XX_NUM_SUPPLIES, state->supplies);
++	if (ret < 0)
++		v4l2_err(&state->sd, "failed to disable regulators\n");
++	else
++		v4l2_dbg(1, debug, &state->sd, "OFF\n");
++	return 0;
++}
++
++/*
++ * V4L2 subdev core and video operations
++ */
++
++static int s5k3l6xx_set_power(struct v4l2_subdev *sd, int on)
++{
++	struct s5k3l6xx *state = to_s5k3l6xx(sd);
++	int ret = 0;
++
++	mutex_lock(&state->lock);
++
++	if (state->power != !on)
++		goto out;
++
++	if (on) {
++		ret = s5k3l6xx_power_on(state);
++		if (ret < 0)
++			goto out;
++		state->power++;
++	} else {
++		ret = s5k3l6xx_power_off(state);
++		state->power--;
++	}
++
++out:
++	mutex_unlock(&state->lock);
++	return ret;
++}
++
++static int s5k3l6xx_hw_set_stream(struct s5k3l6xx *state, int enable)
++{
++	int ret;
++
++	v4l2_dbg(3, debug, &state->sd, "set_stream %d", enable);
++
++	if (!enable) {
++		ret = s5k3l6xx_i2c_write(state, S5K3L6XX_REG_MODE_SELECT,
++					 S5K3L6XX_MODE_STANDBY);
++		if (ret)
++			return ret;
++
++		return 0;
++	}
++
++	ret = s5k3l6xx_i2c_write(state, S5K3L6XX_REG_PLL_PD, 0x01);
++	if (ret)
++		return ret;
++
++	ret = s5k3l6xx_i2c_write(state, S5K3L6XX_REG_MODE_SELECT,
++				 S5K3L6XX_MODE_STREAMING);
++	if (ret)
++		return ret;
++
++	return s5k3l6xx_i2c_write(state, S5K3L6XX_REG_PLL_PD, 0x00);
++}
++
++static int s5k3l6xx_s_stream(struct v4l2_subdev *sd, int on)
++{
++	struct s5k3l6xx *state = to_s5k3l6xx(sd);
++	struct i2c_client *c = v4l2_get_subdevdata(&state->sd);
++	int ret = 0;
++
++	if (state->streaming == !!on) {
++		return 0;
++	}
++
++	if (on) {
++		ret = pm_runtime_get_sync(&c->dev);
++		if (ret < 0) {
++			dev_err(&c->dev, "%s: pm_runtime_get failed: %d\n",
++				__func__, ret);
++			// Not actually sure why this is _noidle.
++			// Because the device was not actually acquired?
++			pm_runtime_put_noidle(&c->dev);
++			return ret;
++		}
++
++		ret = v4l2_ctrl_handler_setup(&state->ctrls.handler);
++		if (ret < 0)
++			goto fail_ctrl;
++		mutex_lock(&state->lock);
++		ret = s5k3l6xx_hw_set_config(state);
++		if (ret < 0)
++			goto fail_to_start;
++		ret = s5k3l6xx_hw_set_stream(state, 1);
++		if (ret < 0)
++			goto fail_to_start;
++	} else {
++		mutex_lock(&state->lock);
++		ret = s5k3l6xx_hw_set_stream(state, 0);
++		if (ret < 0) {
++			mutex_unlock(&state->lock);
++			return ret;
++		}
++		pm_runtime_put(&c->dev);
++	}
++	state->streaming = !state->streaming;
++	mutex_unlock(&state->lock);
++	return 0;
++fail_to_start:
++	mutex_unlock(&state->lock);
++fail_ctrl:
++	pm_runtime_put(&c->dev);
++	dev_err(&c->dev, "failed to start stream: %d\n", ret);
++	return ret;
++}
++
++/*
++ * V4L2 subdev pad level and video operations
++ */
++static int s5k3l6xx_try_cis_format(struct v4l2_mbus_framefmt *mf)
++{
++	int pixfmt;
++	const struct s5k3l6xx_frame *mode = v4l2_find_nearest_size(s5k3l6xx_frames,
++				      ARRAY_SIZE(s5k3l6xx_frames),
++				      width, height,
++				      mf->width, mf->height);
++	struct v4l2_mbus_framefmt candidate = *mf;
++	candidate.width = mode->width;
++	candidate.height = mode->height;
++
++	pixfmt = s5k3l6xx_find_pixfmt(&candidate);
++	if (pixfmt < 0)
++		return pixfmt;
++
++	mf->colorspace = V4L2_COLORSPACE_RAW;
++	mf->code = s5k3l6xx_frames[pixfmt].code;
++	mf->field = V4L2_FIELD_NONE;
++
++	return pixfmt;
++}
++
++static int s5k3l6xx_init_state(struct v4l2_subdev *sd,
++			       struct v4l2_subdev_state *sd_state)
++{
++	struct v4l2_mbus_framefmt *mf;
++
++	mf = v4l2_subdev_state_get_format(sd_state, PAD_CIS);
++	s5k3l6xx_try_cis_format(mf);
++	return 0;
++}
++
++static int s5k3l6xx_enum_mbus_code(struct v4l2_subdev *sd,
++				   struct v4l2_subdev_state *sd_state,
++				   struct v4l2_subdev_mbus_code_enum *code)
++{
++	unsigned repeats[ARRAY_SIZE(s5k3l6xx_frames)] = {0};
++	unsigned i, j;
++	unsigned matching = 0;
++
++	/* Find unique codes within the frame configs array.
++	 * The algorithm is O(n^2), but there's only a handful of configs,
++	 * meaning that it's unlikely to take a long time.
++	 * The repeats array's size is determined at compile time.
++	 */
++	for (i = 0; i < ARRAY_SIZE(s5k3l6xx_frames); i++) {
++		for (j = 0; j < i; j++) {
++			if (s5k3l6xx_frames[j].code == s5k3l6xx_frames[i].code) {
++				repeats[i]++;
++			}
++		}
++	}
++
++	for (i = 0; i < ARRAY_SIZE(s5k3l6xx_frames); i++) {
++		if (repeats[i] != 0)
++			continue;
++
++		if (matching == code->index) {
++			code->code = s5k3l6xx_frames[i].code;
++			return 0;
++		}
++		matching++;
++	}
++
++	return -EINVAL;
++}
++
++static int s5k3l6xx_enum_frame_size(struct v4l2_subdev *sd,
++				    struct v4l2_subdev_state *sd_state,
++				    struct v4l2_subdev_frame_size_enum *fse)
++{
++	unsigned i;
++	unsigned matching = 0;
++
++	for (i = 0; i < ARRAY_SIZE(s5k3l6xx_frames); i++) {
++		if (fse->code != s5k3l6xx_frames[i].code)
++			continue;
++
++		if (fse->index == matching) {
++			fse->code = s5k3l6xx_frames[i].code;
++			fse->min_width = s5k3l6xx_frames[i].width;
++			fse->max_width = s5k3l6xx_frames[i].width;
++			fse->max_height = s5k3l6xx_frames[i].height;
++			fse->min_height = s5k3l6xx_frames[i].height;
++
++			return 0;
++		}
++		matching++;
++	}
++
++	dev_dbg(sd->dev, "fsize i %d m %d", i, matching);
++
++	return -EINVAL;
++}
++
++static void s5k3l6xx_get_current_cis_format(struct v4l2_subdev *sd, struct v4l2_mbus_framefmt *mf)
++{
++	struct s5k3l6xx *state = to_s5k3l6xx(sd);
++	// FIXME: This won't work for debug mode,
++	// which is meant to adjust to whatever userspace wants.
++	// Maybe save what userspace set last.
++	mf->width = state->frame_fmt->width;
++	mf->height = state->frame_fmt->height;
++	mf->code = state->frame_fmt->code;
++	mf->colorspace = V4L2_COLORSPACE_RAW;
++}
++
++static int s5k3l6xx_get_fmt(struct v4l2_subdev *sd,
++			    struct v4l2_subdev_state *sd_state,
++			    struct v4l2_subdev_format *fmt)
++{
++	struct v4l2_mbus_framefmt *mf;
++
++	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
++		mf = v4l2_subdev_state_get_format(sd_state, fmt->pad);
++		fmt->format = *mf;
++		dev_dbg(sd->dev, "try mf %dx%d", mf->width, mf->height);
++		return 0;
++	}
++
++	mf = &fmt->format;
++	if (fmt->pad == PAD_CIS) {
++		s5k3l6xx_get_current_cis_format(sd, mf);
++		dev_dbg(sd->dev, "mf %dx%d", mf->width, mf->height);
++		return 0;
++	}
++	dev_err(sd->dev, "Not a CIS pad! %d", fmt->pad);
++	return 0;
++}
++
++/** Calculating the MIPI clock
++ *
++ * Cast:
++ * - extclk (typically 25MHz)
++ * - MIPI predivider (mipi_div)
++ * - MIPI multiplier (mipi_multiplier)
++ * - MIPI postscaler (mipi_scaler)
++ *
++ * Calculation:
++ * extclk * mipi_multiplier * 2 ^ mipi_scaler / mipi_div
++ *
++ * With defaults:
++ * 24 * 0x64 * 2 ^ 0 / 4
++ * = 24 * 100 * 2 ^ 0 / 4
++ * = 600 [MHz]
++ */
++#define MIPI_CLOCK(extclk, div, multiplier, scaler) ((extclk / div * multiplier) << scaler)
++
++// FIXME: this assumes ext clock of 25MHz (as seen on the L5).
++// It probably can't be computed at compile time
++// because mclk is not fixed.
++static const s64 s5k3l6xx_link_freqs_menu[] = {
++	MIPI_CLOCK(25000000, 4, 0x33, 0), // 0x33 from 1:1 mode
++	MIPI_CLOCK(25000000, 4, 0x36, 0), // 0x36 from 1:4 mode
++	MIPI_CLOCK(25000000, 4, 0x53, 0), // 0x53 from 1:2 mode
++	MIPI_CLOCK(24000000, 4, 0x64, 0), // all from defaults (600MHz, seems right? MIPI maxes out at 625 according to module datasheet)
++};
++
++
++static unsigned s5k3l6xx_calculate_pixel_rate(unsigned mipi_clock, u8 bits_per_pixel, u8 lanes_count) {
++	return mipi_clock * 2 * lanes_count / bits_per_pixel;
++}
++
++static int s5k3l6xx_set_fmt(struct v4l2_subdev *sd,
++			    struct v4l2_subdev_state *sd_state,
++			    struct v4l2_subdev_format *fmt)
++{
++	struct v4l2_mbus_framefmt *mf = &fmt->format;
++	struct s5k3l6xx *state = to_s5k3l6xx(sd);
++	int pixfmt_idx = 0;
++	unsigned mipi_clk;
++	s32 i;
++
++	mf->field = V4L2_FIELD_NONE;
++
++	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
++		*v4l2_subdev_state_get_format(sd_state, fmt->pad) = *mf;
++		return 0;
++	}
++
++	mutex_lock(&state->lock);
++
++	if (state->streaming) {
++		mutex_unlock(&state->lock);
++		return -EBUSY;
++	}
++
++
++	if (state->debug_frame) {
++		state->frame_fmt = &s5k3l6xx_frame_debug;
++		// Keep frame width/height as requested.
++	} else {
++		pixfmt_idx = s5k3l6xx_try_cis_format(mf);
++		if (pixfmt_idx == -1) {
++			v4l2_err(sd, "set_fmt choice unsupported");
++			mutex_unlock(&state->lock);
++			return -EINVAL; // could not find the format. Unsupported
++		}
++		state->frame_fmt = &s5k3l6xx_frames[pixfmt_idx];
++		mf->width = state->frame_fmt->width;
++		mf->height = state->frame_fmt->height;
++	}
++
++	mipi_clk = state->mclk_frequency * state->frame_fmt->mipi_multiplier;
++
++	// Report the smallest freq larger than configured.
++	// Freqs array must increase.
++	for (i = ARRAY_SIZE(s5k3l6xx_link_freqs_menu); i > 0; i--)
++		if (mipi_clk < s5k3l6xx_link_freqs_menu[i - 1])
++			break;
++
++	mf->code = state->frame_fmt->code;
++	mf->colorspace = V4L2_COLORSPACE_RAW;
++	mutex_unlock(&state->lock);
++
++	/*
++	Change of controls is conceptually atomic
++	and should maybe be done within the same lock acquisition,
++	but this ends up calling s_ctrl.
++	s_ctrl can be called from an unguarded context,
++	and it acquires the lock itself,
++	so those two are placed outside of the lock to avoid deadlocking.
++	*/
++	__v4l2_ctrl_s_ctrl(state->ctrls.link_freq, i);
++	__v4l2_ctrl_s_ctrl_int64(state->ctrls.pixel_rate,
++				 (s64)s5k3l6xx_calculate_pixel_rate(mipi_clk, 8, state->nlanes));
++
++	return 0;
++}
++
++enum selection_rect { R_CIS, R_CROP_SINK, R_COMPOSE, R_CROP_SOURCE, R_INVALID };
++
++
++static struct v4l2_rect get_crop(const struct s5k3l6xx_frame *fmt)
++{
++	struct v4l2_rect ret = {
++		.top = 0,
++		.left = 0,
++		.width = fmt->width,
++		.height = fmt->height,
++	};
++	return ret;
++}
++
++static int s5k3l6xx_get_selection(struct v4l2_subdev *sd,
++			       struct v4l2_subdev_state *sd_state,
++			       struct v4l2_subdev_selection *sel)
++{
++	struct s5k3l6xx *state = to_s5k3l6xx(sd);
++
++	// FIXME: does crop rectangle affect vblank/hblank?
++	// If no, then it can be independent of mode (frame format).
++	switch (sel->target) {
++	case V4L2_SEL_TGT_CROP:
++		mutex_lock(&state->lock);
++		switch (sel->which) {
++		case V4L2_SUBDEV_FORMAT_TRY:
++			v4l2_subdev_state_get_crop(sd_state, sel->pad);
++			break;
++		case V4L2_SUBDEV_FORMAT_ACTIVE:
++			sel->r = get_crop(state->frame_fmt);
++			break;
++		}
++		mutex_unlock(&state->lock);
++		return 0;
++	case V4L2_SEL_TGT_CROP_DEFAULT:
++	case V4L2_SEL_TGT_CROP_BOUNDS:
++	case V4L2_SEL_TGT_NATIVE_SIZE:
++		sel->r.top = 0;
++		sel->r.left = 0;
++		sel->r.width = S5K3L6XX_CIS_WIDTH;
++		sel->r.height = S5K3L6XX_CIS_HEIGHT;
++		return 0;
++	default:
++		return -EINVAL;
++	}
++}
++
++static const struct v4l2_subdev_pad_ops s5k3l6xx_pad_ops = {
++	.enum_mbus_code		= s5k3l6xx_enum_mbus_code,
++	.enum_frame_size	= s5k3l6xx_enum_frame_size,
++//	.enum_frame_interval	= s5k5baf_enum_frame_interval,
++	// doesn't seem to be used... ioctl(3, VIDIOC_S_FMT, ...)
++	// instead seems to call enum_fmt, which does enum_mbus_code here.
++	.get_fmt		= s5k3l6xx_get_fmt,
++	.set_fmt		= s5k3l6xx_set_fmt,
++	.get_selection		= s5k3l6xx_get_selection,
++	// TODO: add set_selection
++};
++
++static const struct v4l2_subdev_video_ops s5k3l6xx_video_ops = {
++	//.g_frame_interval	= s5k5baf_g_frame_interval,
++	//.s_frame_interval	= s5k5baf_s_frame_interval,
++	.s_stream		= s5k3l6xx_s_stream,
++};
++
++/*
++ * V4L2 subdev controls
++ */
++
++static int s5k3l6xx_set_test_color(struct s5k3l6xx *state, struct v4l2_ctrl *ctrl, u16 color_channel) {
++	int ret = s5k3l6xx_i2c_write2(state, color_channel, (u16)ctrl->val & 0x3ff);
++	if (ret < 0)
++		return ret;
++	if (state->apply_test_solid)
++		ret = s5k3l6xx_hw_set_test_pattern(state, S5K3L6XX_TEST_PATTERN_SOLID_COLOR);
++	return ret;
++}
++
++static int s5k3l6xx_s_ctrl(struct v4l2_ctrl *ctrl)
++{
++	struct v4l2_subdev *sd = ctrl_to_sd(ctrl);
++	struct s5k3l6xx *state = to_s5k3l6xx(sd);
++	struct i2c_client *c = v4l2_get_subdevdata(&state->sd);
++	int in_use;
++	int ret = 0;
++
++	v4l2_dbg(1, debug, sd, "ctrl: %s, value: %d\n", ctrl->name, ctrl->val);
++
++	mutex_lock(&state->lock);
++
++	// Don't do anything when powered off.
++	// It will get called again when powering up.
++	if (state->power == 0)
++		goto unlock;
++	/* v4l2_ctrl_handler_setup() function may not be used in the device’s runtime PM
++	 * runtime_resume callback, as it has no way to figure out the power state of the device.
++	 * https://www.kernel.org/doc/html/latest/driver-api/media/camera-sensor.html#control-framework
++	 * Okay, so what's the right way to do it? So far relying on state->power.
++	 */
++
++	in_use = pm_runtime_get_if_in_use(&c->dev);
++
++	switch (ctrl->id) {
++	case V4L2_CID_ANALOGUE_GAIN:
++		// Analog gain supported up to 0x200 (16). Gain = register / 32, so 0x20 gives gain 1.
++		ret = s5k3l6xx_i2c_write2(state, S5K3L6XX_REG_ANALOG_GAIN, (u16)ctrl->val & 0x3ff);
++		break;
++	case V4L2_CID_DIGITAL_GAIN:
++		ret = s5k3l6xx_i2c_write2(state, S5K3L6XX_REG_DIGITAL_GAIN, (u16)ctrl->val & 0xfff);
++		break;
++	case V4L2_CID_EXPOSURE:
++		ret = s5k3l6xx_i2c_write2(state, S5K3L6XX_REG_COARSE_INTEGRATION_TIME, (u16)ctrl->val);
++		break;
++	case V4L2_CID_TEST_PATTERN:
++		state->apply_test_solid = (ctrl->val == S5K3L6XX_TEST_PATTERN_SOLID_COLOR);
++		v4l2_dbg(3, debug, sd, "Setting pattern %d", ctrl->val);
++		ret = s5k3l6xx_hw_set_test_pattern(state, ctrl->val);
++		break;
++	case V4L2_CID_TEST_PATTERN_RED:
++		ret = s5k3l6xx_set_test_color(state, ctrl, S5K3L6XX_REG_TEST_DATA_RED);
++		break;
++	case V4L2_CID_TEST_PATTERN_GREENR:
++		ret = s5k3l6xx_set_test_color(state, ctrl, S5K3L6XX_REG_TEST_DATA_GREENR);
++		break;
++	case V4L2_CID_TEST_PATTERN_BLUE:
++		ret = s5k3l6xx_set_test_color(state, ctrl, S5K3L6XX_REG_TEST_DATA_BLUE);
++		break;
++	case V4L2_CID_TEST_PATTERN_GREENB:
++		ret = s5k3l6xx_set_test_color(state, ctrl, S5K3L6XX_REG_TEST_DATA_GREENB);
++		break;
++	}
++
++	if (in_use) { // came from other context than resume, need to manage PM
++		pm_runtime_put(&c->dev);
++	}
++unlock:
++	mutex_unlock(&state->lock);
++	return ret;
++}
++
++static const struct v4l2_ctrl_ops s5k3l6xx_ctrl_ops = {
++	.s_ctrl	= s5k3l6xx_s_ctrl,
++};
++
++static const char * const s5k3l6xx_test_pattern_menu[] = {
++	"Disabled",
++	"Solid", // Color selectable
++	"Bars", // 8 bars 100% saturation: black, blue, red, magents, green, cyan, yellow, white
++	"Fade", // Bars fading towards 50% at the bottom. 512px high. Subdivided into left smooth and right quantized halves.
++	"PN9", // pseudo-random noise
++	"White",
++	"LFSR32"
++	"Address",
++};
++
++
++static int s5k3l6xx_initialize_ctrls(struct s5k3l6xx *state)
++{
++	const struct v4l2_ctrl_ops *ops = &s5k3l6xx_ctrl_ops;
++	struct s5k3l6xx_ctrls *ctrls = &state->ctrls;
++	struct v4l2_ctrl_handler *hdl = &ctrls->handler;
++	struct i2c_client *c = v4l2_get_subdevdata(&state->sd);
++	struct v4l2_fwnode_device_properties props;
++	int ret;
++
++	ret = v4l2_ctrl_handler_init(hdl, 16);
++	if (ret < 0) {
++		v4l2_err(&state->sd, "cannot init ctrl handler (%d)\n", ret);
++		return ret;
++	}
++
++	// FIXME: dummy values. They should be tied to frame properties.
++	// Some derived from frame, some influencing frame.
++
++	// Exposure time (min: 2; max: frame length lines - 2; default: reset value)
++	ctrls->exposure = v4l2_ctrl_new_std(hdl, ops, V4L2_CID_EXPOSURE,
++					    2, 3118, 1, 0x03de);
++
++	ctrls->pixel_rate = v4l2_ctrl_new_std(hdl, ops, V4L2_CID_PIXEL_RATE,
++					      0,
++					      s5k3l6xx_link_freqs_menu[0],
++					      s5k3l6xx_link_freqs_menu[ARRAY_SIZE(s5k3l6xx_link_freqs_menu) - 1],
++					      s5k3l6xx_link_freqs_menu[0]);
++	ctrls->vblank = v4l2_ctrl_new_std(hdl, ops, V4L2_CID_VBLANK,
++					  1, 1, 1, 1);
++	ctrls->hblank = v4l2_ctrl_new_std(hdl, ops, V4L2_CID_HBLANK,
++					  1, 1, 1, 1);
++	if (ctrls->pixel_rate)
++		ctrls->pixel_rate->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++	if (ctrls->vblank)
++		ctrls->vblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++	if (ctrls->hblank)
++		ctrls->hblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	// Total gain: 32 <=> 1x
++	ctrls->analog_gain = v4l2_ctrl_new_std(hdl, ops, V4L2_CID_ANALOGUE_GAIN,
++					0x20, 0x200, 1, 0x20);
++
++	// Digital gain range: 1.0x - 3.0x
++	ctrls->digital_gain = v4l2_ctrl_new_std(hdl, ops, V4L2_CID_DIGITAL_GAIN,
++					0x100, 0x300, 1, 0x100);
++
++	v4l2_ctrl_new_std_menu_items(hdl, ops, V4L2_CID_TEST_PATTERN,
++				     ARRAY_SIZE(s5k3l6xx_test_pattern_menu) - 1,
++				     0, 0, s5k3l6xx_test_pattern_menu);
++
++	v4l2_ctrl_new_std(hdl, ops, V4L2_CID_TEST_PATTERN_RED, 0, 1023, 1, 512);
++	v4l2_ctrl_new_std(hdl, ops, V4L2_CID_TEST_PATTERN_GREENR, 0, 1023, 1, 512);
++	v4l2_ctrl_new_std(hdl, ops, V4L2_CID_TEST_PATTERN_BLUE, 0, 1023, 1, 512);
++	v4l2_ctrl_new_std(hdl, ops, V4L2_CID_TEST_PATTERN_GREENB, 0, 1023, 1, 512);
++
++
++	ctrls->link_freq = v4l2_ctrl_new_int_menu(hdl, ops, V4L2_CID_LINK_FREQ,
++						  ARRAY_SIZE(s5k3l6xx_link_freqs_menu) - 1,
++						  0, s5k3l6xx_link_freqs_menu);
++
++	ctrls->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	if (hdl->error) {
++		v4l2_err(&state->sd, "error creating controls (%d)\n",
++			 hdl->error);
++		ret = hdl->error;
++		v4l2_ctrl_handler_free(hdl);
++		return ret;
++	}
++
++	ret = v4l2_fwnode_device_parse(&c->dev, &props);
++	if (ret)
++		return ret;
++
++	ret = v4l2_ctrl_new_fwnode_properties(hdl, ops, &props);
++	if (ret)
++		return ret;
++
++	state->sd.ctrl_handler = hdl;
++	return 0;
++}
++
++/*
++ * V4L2 subdev internal operations
++ */
++static const struct v4l2_subdev_core_ops s5k3l6xx_core_ops = {
++	.log_status = v4l2_ctrl_subdev_log_status,
++};
++
++static const struct v4l2_subdev_ops s5k3l6xx_subdev_ops = {
++	.core = &s5k3l6xx_core_ops,
++	.pad = &s5k3l6xx_pad_ops,
++	.video = &s5k3l6xx_video_ops,
++};
++
++static const struct v4l2_subdev_internal_ops s5k3l6xx_internal_ops = {
++	.init_state = s5k3l6xx_init_state,
++};
++
++static int __maybe_unused s5k3l6xx_suspend(struct device *dev)
++{
++	struct i2c_client *client = to_i2c_client(dev);
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct s5k3l6xx *state = to_s5k3l6xx(sd);
++
++	dev_dbg(dev, "%s\n", __func__);
++
++	if (state->streaming)
++		s5k3l6xx_hw_set_stream(state, 0);
++
++	return s5k3l6xx_set_power(sd, FALSE);
++}
++
++static int __maybe_unused s5k3l6xx_resume(struct device *dev)
++{
++	struct i2c_client *client = to_i2c_client(dev);
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct s5k3l6xx *state = to_s5k3l6xx(sd);
++	int ret;
++
++	dev_dbg(dev, "%s\n", __func__);
++
++	ret = s5k3l6xx_set_power(sd, TRUE);
++
++	if (ret == 0 && state->streaming) {
++		ret = s5k3l6xx_hw_set_config(state);
++		if (ret < 0) {
++			state->streaming = 0;
++			return ret;
++		}
++
++		ret = s5k3l6xx_hw_set_stream(state, 1);
++		if (ret)
++			state->streaming = 0;
++	}
++
++	return ret;
++}
++
++static int s5k3l6xx_parse_device_node(struct s5k3l6xx *state, struct device *dev)
++{
++	struct device_node *node = dev->of_node;
++	struct device_node *node_ep;
++	struct v4l2_fwnode_endpoint ep = { .bus_type = 0 };
++	int ret;
++
++	if (!node) {
++		dev_err(dev, "no device-tree node provided\n");
++		return -EINVAL;
++	}
++
++	ret = of_property_read_u32(node, "clock-frequency",
++				   &state->mclk_frequency);
++	if (ret < 0) {
++		state->mclk_frequency = S5K3L6XX_DEFAULT_MCLK_FREQ;
++		dev_warn(dev, "using default %u Hz clock frequency\n",
++			 state->mclk_frequency);
++	}
++
++	state->rst_gpio = devm_gpiod_get(dev, "rstn", GPIOD_OUT_LOW);
++	if (IS_ERR(state->rst_gpio)) {
++		dev_err(dev, "failed to get rstn gpio: %pe\n", state->rst_gpio);
++		return PTR_ERR(state->rst_gpio);
++	}
++
++	node_ep = of_graph_get_next_endpoint(node, NULL);
++	if (!node_ep) {
++		dev_err(dev, "no endpoint defined at node %pOF\n", node);
++		return -EINVAL;
++	}
++
++	ret = v4l2_fwnode_endpoint_parse(of_fwnode_handle(node_ep), &ep);
++	of_node_put(node_ep);
++	if (ret) {
++		dev_err(dev, "fwnode endpoint parse failed\n");
++		return ret;
++	}
++
++	state->bus_type = ep.bus_type;
++
++	switch (state->bus_type) {
++	case V4L2_MBUS_CSI2_DPHY:
++		state->nlanes = (unsigned char)ep.bus.mipi_csi2.num_data_lanes;
++		break;
++	default:
++		dev_err(dev, "unsupported bus %d in endpoint defined at node %pOF\n",
++			state->bus_type, (void*)node);
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++static int s5k3l6xx_configure_subdevs(struct s5k3l6xx *state,
++				     struct i2c_client *c)
++{
++	struct v4l2_subdev *sd;
++	int ret;
++
++	/*sd = &state->cis_sd;
++	v4l2_subdev_init(sd, &s5k5baf_cis_subdev_ops);
++	sd->owner = THIS_MODULE;
++	v4l2_set_subdevdata(sd, state);
++	snprintf(sd->name, sizeof(sd->name), "S5K5BAF-CIS %d-%04x",
++		 i2c_adapter_id(c->adapter), c->addr);
++
++	sd->internal_ops = &s5k5baf_internal_ops;
++	sd->flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
++
++	state->cis_pad.flags = MEDIA_PAD_FL_SOURCE;
++	sd->entity.function = MEDIA_ENT_F_CAM_SENSOR;
++	ret = media_entity_pads_init(&sd->entity, NUM_CIS_PADS, &state->cis_pad);
++	if (ret < 0)
++		goto err;*/
++	sd = &state->sd;
++	v4l2_i2c_subdev_init(sd, c, &s5k3l6xx_subdev_ops);
++	sd->internal_ops = &s5k3l6xx_internal_ops;
++	v4l2_info(sd, "probe i2c %px", (void*)c);
++
++	sd->flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
++
++	state->cis_pad.flags = MEDIA_PAD_FL_SOURCE;
++	sd->entity.function = MEDIA_ENT_F_CAM_SENSOR;
++	ret = media_entity_pads_init(&sd->entity, NUM_CIS_PADS, &state->cis_pad);
++
++	if (!ret)
++		return 0;
++
++	//media_entity_cleanup(&state->cis_sd.entity);
++//err:
++	dev_err(&c->dev, "cannot init media entity %s\n", sd->name);
++	return ret;
++}
++
++static int debug_add(void *data, u64 value)
++{
++	struct s5k3l6xx *state = data;
++	struct regstable_entry entry = {
++		.address = state->debug_address,
++		.value = (u8)value,
++	};
++	struct i2c_client *c = v4l2_get_subdevdata(&state->sd);
++	v4l2_dbg(1, debug, c, "debug add override 0x%04x 0x%02x\n", entry.address, entry.value);
++	/* Not sure which error flag to set here.
++	 * EOF is not available. E2BIG seems to be used too. */
++	if (state->debug_regs.entry_count >= REGSTABLE_SIZE)
++		return -EFBIG;
++	if (value != entry.value)
++		return -EINVAL;
++	state->debug_regs.entries[state->debug_regs.entry_count] = entry;
++	state->debug_regs.entry_count++;
++	return 0;
++}
++
++static int debug_clear(void *data, u64 value)
++{
++	struct s5k3l6xx *state = data;
++	struct i2c_client *c = v4l2_get_subdevdata(&state->sd);
++	(void)value;
++	v4l2_dbg(1, debug, c, "debug clear\n");
++	state->debug_regs.entry_count = 0;
++	return 0;
++}
++
++DEFINE_SIMPLE_ATTRIBUTE(debug_add_ops, NULL, debug_add, "%llx\n");
++DEFINE_SIMPLE_ATTRIBUTE(debug_clear_ops, NULL, debug_clear, "%llu\n");
++
++static int s5k3l6xx_probe(struct i2c_client *c)
++{
++	struct s5k3l6xx *state;
++	int ret;
++	unsigned i;
++	unsigned long mclk_freq;
++	struct s5k3l6xx_read_result test;
++	struct dentry *d;
++
++	state = devm_kzalloc(&c->dev, sizeof(*state), GFP_KERNEL);
++	if (!state)
++		return -ENOMEM;
++
++	mutex_init(&state->lock);
++
++	ret = s5k3l6xx_parse_device_node(state, &c->dev);
++	if (ret < 0) {
++		pr_err("s5k3l6xx_parse_device_node: failed");
++		return ret;
++	}
++
++	ret = s5k3l6xx_configure_subdevs(state, c);
++	if (ret < 0) {
++		pr_err("s5k3l6xx_configure_subdevs: failed");
++		return ret;
++	}
++
++	for (i = 0; i < S5K3L6XX_NUM_SUPPLIES; i++)
++		state->supplies[i].supply = s5k3l6xx_supply_names[i];
++
++	ret = devm_regulator_bulk_get(&c->dev, S5K3L6XX_NUM_SUPPLIES,
++				      state->supplies);
++	if (ret < 0) {
++		pr_err("s5k3l6xx configure regulators: failed");
++		goto err_me;
++	}
++
++	state->clock = devm_clk_get(state->sd.dev, S5K3L6XX_CLK_NAME);
++	if (IS_ERR(state->clock)) {
++		pr_err("get clk failed: failed");
++		ret = -EPROBE_DEFER;
++		goto err_me;
++	}
++
++	mclk_freq = clk_get_rate(state->clock);
++	/* The sensor supports between 6MHz and 32MHz,
++	 * but I can't properly test that.
++	 */
++	if ((mclk_freq < 6000000) || (mclk_freq > 32000000)) {
++		dev_err(&c->dev,
++			"External clock frequency out of range: %lu.\n",
++			mclk_freq);
++		goto err_me;
++	}
++
++	ret = s5k3l6xx_power_on(state);
++	if (ret < 0) {
++		pr_err("s5k3l6xx_power_on: failed");
++		goto err_me;
++	}
++	state->power = 1;
++
++	test = s5k3l6xx_read(state, S5K3L6XX_REG_MODEL_ID_L);
++	if (test.retcode < 0) {
++		ret = test.retcode;
++		goto err_power;
++	} else if (test.value != S5K3L6XX_MODEL_ID_L) {
++		dev_err(&c->dev, "model mismatch: 0x%X != 0x30\n", test.value);
++		ret = -EINVAL;
++		goto err_power;
++	} else
++		dev_info(&c->dev, "model low: 0x%X\n", test.value);
++
++	test = s5k3l6xx_read(state, S5K3L6XX_REG_MODEL_ID_H);
++	if (test.retcode < 0) {
++		ret = test.retcode;
++		goto err_power;
++	} else if (test.value != S5K3L6XX_MODEL_ID_H) {
++		dev_err(&c->dev, "model mismatch: 0x%X != 0xC6\n", test.value);
++		ret = -EINVAL;
++		goto err_power;
++	} else
++		dev_info(&c->dev, "model high: 0x%X\n", test.value);
++
++	test = s5k3l6xx_read(state, S5K3L6XX_REG_REVISION_NUMBER);
++	if (test.retcode < 0) {
++		ret = test.retcode;
++		goto err_power;
++	} else if (test.value != S5K3L6XX_REVISION_NUMBER) {
++		dev_err(&c->dev, "revision mismatch: 0x%X != 0xB0\n", test.value);
++		ret = -EINVAL;
++		goto err_power;
++	} else
++		dev_info(&c->dev, "revision number: 0x%X\n", test.value);
++
++	ret = s5k3l6xx_initialize_ctrls(state);
++	if (ret < 0)
++		goto err_power;
++
++	ret = v4l2_async_register_subdev_sensor(&state->sd);
++	if (ret < 0)
++		goto err_ctrl;
++
++	pm_runtime_set_active(&c->dev);
++	pm_runtime_enable(&c->dev);
++	// I don't really know why this idle is needed
++	pm_runtime_idle(&c->dev);
++
++	// Default frame.
++	state->frame_fmt = &s5k3l6xx_frames[0];
++
++	d = debugfs_create_dir("s5k3l6", NULL);
++	// When set to 1, then any frame size is accepted in frame set.
++	// In addition, no sensor registers will be set, except stream on and bits per pixel.
++	state->debug_frame = 0;
++	debugfs_create_u8("debug_frame", S_IRUSR | S_IWUSR, d, &state->debug_frame);
++
++	/* Can't be bothered to expose the entire register set in one file, so here it is.
++	 * 1. Write u16 as hex to `address`.
++	 * 2. Write u8 as hex to `add_value` and the *address = value will be saved.
++	 * 3. Repeat if needed.
++	 * 4. Reset the device (a suspend cycle will do)
++	 * 5. Take pictures.
++	 * 6. Write `1` to `clear` to erase all the added values.
++	 */
++	debugfs_create_x16("address", S_IRUSR | S_IWUSR, d, &state->debug_address);
++	debugfs_create_file("add_value", S_IWUSR, d, (void*)state, &debug_add_ops);
++	debugfs_create_file("clear", S_IWUSR, d, (void*)state, &debug_clear_ops);
++
++	return 0;
++
++err_ctrl:
++	v4l2_ctrl_handler_free(state->sd.ctrl_handler);
++err_power:
++	s5k3l6xx_power_off(state);
++err_me:
++	media_entity_cleanup(&state->sd.entity);
++	media_entity_cleanup(&state->cis_sd.entity);
++	return ret;
++}
++
++static void s5k3l6xx_remove(struct i2c_client *c)
++{
++	struct v4l2_subdev *sd = i2c_get_clientdata(c);
++	struct s5k3l6xx *state = to_s5k3l6xx(sd);
++
++	v4l2_async_unregister_subdev(sd);
++	v4l2_ctrl_handler_free(sd->ctrl_handler);
++	media_entity_cleanup(&sd->entity);
++
++	sd = &state->cis_sd;
++	v4l2_device_unregister_subdev(sd);
++	media_entity_cleanup(&sd->entity);
++
++	pm_runtime_disable(&c->dev);
++	pm_runtime_set_suspended(&c->dev);
++	pm_runtime_put_noidle(&c->dev);
++}
++
++static const struct dev_pm_ops s5k3l6xx_pm_ops = {
++	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
++				pm_runtime_force_resume)
++	SET_RUNTIME_PM_OPS(s5k3l6xx_suspend, s5k3l6xx_resume, NULL)
++};
++
++static const struct i2c_device_id s5k3l6xx_id[] = {
++	{ S5K3L6XX_DRIVER_NAME, 0 },
++	{ },
++};
++MODULE_DEVICE_TABLE(i2c, s5k3l6xx_id);
++
++static const struct of_device_id s5k3l6xx_of_match[] = {
++	{ .compatible = "samsung,s5k3l6xx" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, s5k3l6xx_of_match);
++
++static struct i2c_driver s5k3l6xx_i2c_driver = {
++	.driver = {
++		.pm = &s5k3l6xx_pm_ops,
++		.of_match_table = s5k3l6xx_of_match,
++		.name = S5K3L6XX_DRIVER_NAME
++	},
++	.probe		= s5k3l6xx_probe,
++	.remove		= s5k3l6xx_remove,
++	.id_table	= s5k3l6xx_id,
++};
++
++module_i2c_driver(s5k3l6xx_i2c_driver);
++
++MODULE_DESCRIPTION("Samsung S5K3L6XX 13M camera driver");
++MODULE_AUTHOR("Martin Kepplinger <martin.kepplinger@puri.sm>");
++MODULE_AUTHOR("Dorota Czaplejewicz <dorota.czaplejewicz@puri.sm>");
++MODULE_LICENSE("GPL v2");

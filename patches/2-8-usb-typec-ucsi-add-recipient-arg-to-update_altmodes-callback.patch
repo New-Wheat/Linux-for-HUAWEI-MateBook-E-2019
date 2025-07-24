@@ -1,0 +1,56 @@
+diff --git a/drivers/usb/typec/ucsi/ucsi.c b/drivers/usb/typec/ucsi/ucsi.c
+index 01ce858a1a2b3466155db340e213c767d1e79479..e913d099f934c7728cb678fc8e21e75ab0a00cce 100644
+--- a/drivers/usb/typec/ucsi/ucsi.c
++++ b/drivers/usb/typec/ucsi/ucsi.c
+@@ -531,13 +531,12 @@ ucsi_register_altmodes_nvidia(struct ucsi_connector *con, u8 recipient)
+ 	 * Update the original altmode table as some ppms may report
+ 	 * multiple DP altmodes.
+ 	 */
+-	if (recipient == UCSI_RECIPIENT_CON)
+-		multi_dp = ucsi->ops->update_altmodes(ucsi, orig, updated);
++	multi_dp = ucsi->ops->update_altmodes(ucsi, recipient, orig, updated);
+ 
+ 	/* now register altmodes */
+ 	for (i = 0; i < max_altmodes; i++) {
+ 		memset(&desc, 0, sizeof(desc));
+-		if (multi_dp && recipient == UCSI_RECIPIENT_CON) {
++		if (multi_dp) {
+ 			desc.svid = updated[i].svid;
+ 			desc.vdo = updated[i].mid;
+ 		} else {
+diff --git a/drivers/usb/typec/ucsi/ucsi.h b/drivers/usb/typec/ucsi/ucsi.h
+index 5a8f947fcece29f98c0458f9eb05c0c5ede2d244..d02f6a3e2f50a4044eb3f22276931017cc624532 100644
+--- a/drivers/usb/typec/ucsi/ucsi.h
++++ b/drivers/usb/typec/ucsi/ucsi.h
+@@ -82,7 +82,8 @@ struct ucsi_operations {
+ 	int (*sync_control)(struct ucsi *ucsi, u64 command, u32 *cci,
+ 			    void *data, size_t size);
+ 	int (*async_control)(struct ucsi *ucsi, u64 command);
+-	bool (*update_altmodes)(struct ucsi *ucsi, struct ucsi_altmode *orig,
++	bool (*update_altmodes)(struct ucsi *ucsi, u8 recipient,
++				struct ucsi_altmode *orig,
+ 				struct ucsi_altmode *updated);
+ 	void (*update_connector)(struct ucsi_connector *con);
+ 	void (*connector_status)(struct ucsi_connector *con);
+diff --git a/drivers/usb/typec/ucsi/ucsi_ccg.c b/drivers/usb/typec/ucsi/ucsi_ccg.c
+index e9a9df1431af3a52c00cc456f5c920b9077a1ade..d83a0051c737336af2543fc2f6d53a131ffe9583 100644
+--- a/drivers/usb/typec/ucsi/ucsi_ccg.c
++++ b/drivers/usb/typec/ucsi/ucsi_ccg.c
+@@ -394,6 +394,7 @@ static void ucsi_ccg_update_get_current_cam_cmd(struct ucsi_ccg *uc, u8 *data)
+ }
+ 
+ static bool ucsi_ccg_update_altmodes(struct ucsi *ucsi,
++				     u8 recipient,
+ 				     struct ucsi_altmode *orig,
+ 				     struct ucsi_altmode *updated)
+ {
+@@ -402,6 +403,9 @@ static bool ucsi_ccg_update_altmodes(struct ucsi *ucsi,
+ 	int i, j, k = 0;
+ 	bool found = false;
+ 
++	if (recipient != UCSI_RECIPIENT_CON)
++		return false;
++
+ 	alt = uc->orig;
+ 	new_alt = uc->updated;
+ 	memset(uc->updated, 0, sizeof(uc->updated));
