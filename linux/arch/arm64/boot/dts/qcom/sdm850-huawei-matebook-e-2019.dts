@@ -2,7 +2,7 @@
 /*
  * HUAWEI MateBook E (2019)
  *
- * Copyright (c) 2024, NewWheat
+ * Copyright (c) 2025, NewWheat
  */
 
 /dts-v1/;
@@ -36,7 +36,7 @@
 
 / {
 	model = "HUAWEI MateBook E (2019)";
-	compatible = "lenovo,flex-5g", "qcom,sdm845";
+	compatible = "huawei,planck", "qcom,sdm845";
 	chassis-type = "convertible";
 
 	aliases {
@@ -245,18 +245,6 @@
 		regulator-boot-on;
 
 		vin-supply = <&vph_pwr>;
-	};
-
-	panel {
-		compatible = "innolux,p120zdg-bf1";
-		power-supply = <&vlcm_3v3>;
-		no-hpd;
-
-		port {
-			panel_in_edp: endpoint {
-				remote-endpoint = <&sn65dsi86_out>;
-			};
-		};
 	};
 
 	leds {
@@ -749,7 +737,7 @@
 	status = "okay";
 	clock-frequency = <400000>;
 
-	tsc1: hid@5d {
+	touchscreen: hid@5d {
 		compatible = "hid-over-i2c";
 		reg = <0x5d>;
 		hid-descr-addr = <0x1>;
@@ -770,8 +758,9 @@
 		compatible = "huawei,planck-ec";
 		reg = <0x76>;
 
-		interrupts-extended = <&tlmm 24 IRQ_TYPE_LEVEL_LOW>;
-		wakeup-source;
+		status = "okay";
+
+		interrupts-extended = <&tlmm 40 IRQ_TYPE_LEVEL_LOW>;
 
 		pinctrl-names = "default";
 		pinctrl-0 = <&ec_int_default>;
@@ -850,6 +839,19 @@
 				reg = <1>;
 				sn65dsi86_out: endpoint {
 					remote-endpoint = <&panel_in_edp>;
+				};
+			};
+		};
+
+		aux-bus {
+			panel: panel {
+				compatible = "innolux,p120zdg-bf1";
+				power-supply = <&vlcm_3v3>;
+
+				port {
+					panel_in_edp: endpoint {
+						remote-endpoint = <&sn65dsi86_out>;
+					};
 				};
 			};
 		};
@@ -940,6 +942,10 @@
 	wakeup-source;
 };
 
+&pm8998_rtc {
+	qcom,uefi-rtc-info;
+};
+
 &qup_i2c3_default {
 	drive-strength = <2>;
 	bias-disable;
@@ -975,23 +981,23 @@
 
 &q6asmdai {
 	dai@0 {
-		reg = <0>;
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA1>;
 	};
 
 	dai@1 {
-		reg = <1>;
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA2>;
 	};
 
 	dai@2 {
-		reg = <2>;
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA3>;
 	};
 
 	dai@3 {
-		reg = <3>;
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA4>;
 	};
 
 	dai@4 {
-		reg = <4>;
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA5>;
 	};
 };
 
@@ -1216,11 +1222,10 @@
 	};
 
 	ec_int_default: ec-int-default-state {
-		pins = "gpio24";
+		pins = "gpio40";
 		function = "gpio";
 
 		drive-strength = <2>;
-		input-enable;
 		bias-disable;
 	};
 
@@ -1400,5 +1405,5 @@
 	vdd-3.3-ch1-supply = <&vreg_l23a_3p3>;
 
 	qcom,snoc-host-cap-8bit-quirk;
-	qcom,ath10k-calibration-variant = "Lenovo_C630";
+	qcom,calibration-variant = "Lenovo_C630";
 };
