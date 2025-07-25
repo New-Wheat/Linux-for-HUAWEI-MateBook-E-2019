@@ -36,7 +36,7 @@ Supported features (some require proper firmware files placed in `/lib/firmware`
 
 - [ ] External display _(video output via USB-C currently works very badly)_
 - [ ] Camera
-    - front camera: gc5025 (using modified downstream driver, no video output)
+    - front camera: gc5025 _(using modified downstream driver, no video output)_
 
 ## Source Code
 
@@ -44,6 +44,8 @@ Linux kernel source code: https://gitlab.com/sdm845-mainline/linux
 
 s5k3l6 camera sensor driver: https://source.puri.sm/sebastian.krzyszkowiak/linux-next/-/blob/dos-6.9/drivers/media/i2c/s5k3l6xx.c
 
+gc5025 camera sensor driver: https://github.com/radxa/kernel/blob/linux-6.1-stan-rkr5.1/drivers/media/i2c/gc5025.c
+
 ## Testing Platform
 
-Debian 12 (Linux kernel 6.14-rc5)
+Debian 12 (Linux kernel 6.16-rc2)
