@@ -2,6 +2,8 @@
 
 [Devicetree](https://github.com/New-Wheat/Linux-for-HUAWEI-MateBook-E-2019/blob/main/linux/arch/arm64/boot/dts/qcom/sdm850-huawei-matebook-e-2019.dts) and extra resources to run Linux on HUAWEI MateBook E 2019
 
+**NOTE: Devicetree has been accepted and will be available in mainline tree soon.**
+
 ## Status
 
 Supported features (some require proper firmware files placed in `/lib/firmware`):
@@ -21,16 +23,17 @@ Supported features (some require proper firmware files placed in `/lib/firmware`
 - Audio _(**UNSTABLE**, right internal mic and headphone mic not enabled)_
 - Mobile Network
 - Camera Indicator LED  
-- Rear Camera _(VCM driver for the actuator is [here](https://github.com/New-Wheat/Linux-for-HUAWEI-MateBook-E-2019/blob/main/patches/camera_sensors_and_actuator.patch))_
+- Rear Camera* _(VCM driver for the actuator is [here](https://github.com/New-Wheat/Linux-for-HUAWEI-MateBook-E-2019/blob/main/patches/camera_sensors_and_actuator.patch))_
 - _**The following features require [huawei-planck-ec](https://github.com/New-Wheat/Linux-for-HUAWEI-MateBook-E-2019/blob/main/patches/huawei_planck_ec.patch) driver**_
-    - Battery Monitoring
-    - Lid
-    - Backlight
-    - USCI 
+    - Battery Monitoring*
+    - Lid*
+    - Backlight*
+    - USCI*
 - _**The following features require libssc and hexagonrpcd (See [here](https://gitlab.com/postmarketOS/pmaports/-/merge_requests/4050))**_
     - Accelerometer
     - Ambient Light Sensor
 
+_Features with '*' mean that they're not upstreamed yet. To utilize these features, please use the devcietree [here](https://github.com/New-Wheat/Linux-for-HUAWEI-MateBook-E-2019/blob/main/linux/arch/arm64/boot/dts/qcom/sdm850-huawei-matebook-e-2019.dts) instead._
 
 ## Todo
 
